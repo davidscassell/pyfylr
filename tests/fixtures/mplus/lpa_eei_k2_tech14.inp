@@ -1,0 +1,31 @@
+TITLE:
+  TECH14 input, not yet run. 2-class Gaussian LPA, EEI.
+  Same MODEL as lpa_eei_k2.inp. Class-specific means.
+  One shared diagonal covariance. H0 is the 1-class model.
+  ESTIMATOR=ML. STARTS = 20 4. LRTSTARTS = 20 4 20 4.
+  LRTBOOTSTRAP = 100. PROCESSORS = 1.
+  profylr's p-value on lpa_eei_k2.dat is in docs/evidence-r1.md.
+  That comparison is not a validation. BLRT stays off in select_model.
+DATA: FILE = lpa_eei_k2.dat;
+VARIABLE:
+  NAMES = y1 y2 y3;
+  USEVARIABLES = y1-y3;
+  CLASSES = c(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = ML;
+  STARTS = 20 4;
+  LRTSTARTS = 20 4 20 4;
+  LRTBOOTSTRAP = 100;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  y1-y3 (v1-v3);
+  y1 WITH y2@0;
+  y1 WITH y3@0;
+  y2 WITH y3@0;
+  %c#1%
+  [y1 y2 y3];
+  %c#2%
+  [y1 y2 y3];
+OUTPUT: TECH14;

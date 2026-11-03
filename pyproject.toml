@@ -1,0 +1,49 @@
+[build-system]
+requires = ["scikit-build-core>=0.8", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pyfylr"
+version = "0.1.0"
+description = "Latent transition, latent class, and latent profile models. Release 1 uses the shared C++ EM core."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+# The wheel installs only the _core extension. These license files are copied
+# into *.dist-info/licenses so the binary carries the Eigen texts. The sdist
+# already force-includes _staged_core/vendor/Eigen.
+license-files = [
+  "LICENSE",
+  "THIRD_PARTY_NOTICES",
+  "_staged_core/vendor/Eigen/COPYING.MPL2",
+  "_staged_core/vendor/Eigen/COPYING.BSD",
+  "_staged_core/vendor/Eigen/COPYING.APACHE",
+  "_staged_core/vendor/Eigen/COPYING.LGPL",
+  "_staged_core/vendor/Eigen/COPYING.README",
+]
+authors = [{name = "David S. Cassell"}]
+dependencies = [
+  "numpy>=2.1; python_version>='3.13'",
+  "numpy>=2.0; python_version<'3.13'",
+  "pandas>=2.2.3",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib", "seaborn"]
+sklearn = ["scikit-learn>=1.3"]
+
+[project.urls]
+Homepage = "https://github.com/davidscassell/pyfylr"
+Repository = "https://github.com/davidscassell/pyfylr"
+Issues = "https://github.com/davidscassell/pyfylr/issues"
+
+[tool.scikit-build]
+cmake.version = ">=3.15"
+wheel.packages = ["src/pyfylr"]
+install.strip = false
+
+[tool.scikit-build.sdist.force-include]
+"_staged_core/src/lta.cpp" = "_staged_core/src/lta.cpp"
+"_staged_core/src/describe.cpp" = "_staged_core/src/describe.cpp"
+"_staged_core/include/lta" = "_staged_core/include/lta"
+"_staged_core/vendor/Eigen" = "_staged_core/vendor/Eigen"

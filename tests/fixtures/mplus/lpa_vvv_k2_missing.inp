@@ -1,0 +1,26 @@
+TITLE:
+  Release 1: 2-class Gaussian LPA, VVV, with missing data. 11 parameters.
+  Class-specific means and covariances. Missing is '.' (FIML).
+  Mplus 8 for Mac, MLR, STARTS 40 10. User run, 25 October 2026.
+DATA: FILE = lpa_vvv_k2_missing.dat;
+VARIABLE:
+  NAMES = y1 y2;
+  USEVARIABLES = y1-y2;
+  MISSING = .;
+  CLASSES = c(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = MLR;
+  STARTS = 40 10;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  %c#1%
+  [y1 y2];
+  y1 y2;
+  y1 WITH y2;
+  %c#2%
+  [y1 y2];
+  y1 y2;
+  y1 WITH y2;
+OUTPUT: TECH1;

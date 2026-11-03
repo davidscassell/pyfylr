@@ -1,0 +1,33 @@
+TITLE:
+  Release 1: latent transition, K=2, T=2, J=2 Bernoulli. 7 parameters.
+  Invariant measurement. One transition matrix. No known class.
+  Mplus 8 for Mac, MLR, STARTS 40 10. User run, 25 October 2026.
+DATA: FILE = lta_bernoulli_k2_t2.dat;
+VARIABLE:
+  NAMES = u11 u12 u21 u22;
+  USEVARIABLES = u11-u22;
+  CATEGORICAL = u11-u22;
+  CLASSES = c1(2) c2(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = MLR;
+  STARTS = 40 10;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  c2 ON c1;
+MODEL c1:
+  %c1#1%
+  [u11$1] (a1);
+  [u12$1] (a2);
+  %c1#2%
+  [u11$1] (b1);
+  [u12$1] (b2);
+MODEL c2:
+  %c2#1%
+  [u21$1] (a1);
+  [u22$1] (a2);
+  %c2#2%
+  [u21$1] (b1);
+  [u22$1] (b2);
+OUTPUT: TECH1;

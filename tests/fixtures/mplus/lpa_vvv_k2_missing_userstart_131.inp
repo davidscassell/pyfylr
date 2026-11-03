@@ -1,0 +1,32 @@
+TITLE:
+  VVV k=2 missing. User starting values at the -131.247967 solution.
+  No random starts. Same data as lpa_vvv_k2_missing.inp.
+  Values are the seed-9 full-information estimates (500 starts, screen off):
+  log-likelihood -131.24796735654709, found on 2 of 500 starts.
+DATA: FILE = lpa_vvv_k2_missing.dat;
+VARIABLE:
+  NAMES = y1 y2;
+  USEVARIABLES = y1-y2;
+  MISSING = .;
+  CLASSES = c(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = MLR;
+  STARTS = 0;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  [c#1*1.3079616969800554];
+  %c#1%
+  [y1*-0.59416263395587332];
+  [y2*0.13524507004567432];
+  y1*1.2561039430331384;
+  y2*1.9409510469064601;
+  y1 WITH y2*1.0332463905324589;
+  %c#2%
+  [y1*1.2673940333852507];
+  [y2*1.1254185676803614];
+  y1*0.40287764471584353;
+  y2*0.20779184930636743;
+  y1 WITH y2*-0.28165571679219464;
+OUTPUT: TECH1 TECH8;

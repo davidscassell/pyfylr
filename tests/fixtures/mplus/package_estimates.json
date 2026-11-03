@@ -1,0 +1,809 @@
+{
+  "controls": {
+    "n_starts": 40,
+    "n_full": 4,
+    "screen_iter": 10,
+    "max_iter": 200,
+    "tol": 1e-08,
+    "replicate_tol": 0.001,
+    "seed": 1,
+    "n_threads": 1,
+    "align_labels": false
+  },
+  "note": "profylr and pyfylr parameter vectors agree to 0 absolute difference under these controls. Both copies are stored.",
+  "pyfylr": {
+    "lca_bernoulli_k2": {
+      "loglik": -183.94857785940184,
+      "bic": 407.33539543086863,
+      "aic": 385.8971557188037,
+      "n_parameters": 9,
+      "n_analyzed": 80,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 18,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": null,
+      "cov_ill_conditioned": null,
+      "cov_collapsed_component": null,
+      "condition_number": null,
+      "min_eigenvalue": null,
+      "min_relative_variance": null,
+      "eligible_measurement": true,
+      "delta": [
+        0.4569727927853416,
+        0.5430272072146585
+      ],
+      "tau": [],
+      "rho": [
+        0.14491417846942148,
+        0.8550858215305781,
+        0.9369294142006316,
+        0.06307058579936853,
+        0.18301377702485422,
+        0.8169862229751453,
+        0.8127911038908332,
+        0.18720889610916697,
+        0.7251615526086147,
+        0.27483844739138485,
+        0.26448195997500673,
+        0.7355180400249934,
+        0.8533095429085763,
+        0.14669045709142345,
+        0.08758447907359454,
+        0.9124155209264054
+      ],
+      "means": [],
+      "cov": []
+    },
+    "lpa_eei_k2": {
+      "loglik": -318.55960836510616,
+      "bic": 680.9394830769511,
+      "aic": 657.1192167302123,
+      "n_parameters": 10,
+      "n_analyzed": 80,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 13,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": 1.0000000000000004,
+      "min_eigenvalue": 0.47883998523281834,
+      "min_relative_variance": 0.2811088395029175,
+      "eligible_measurement": true,
+      "delta": [
+        0.35839580347289235,
+        0.6416041965271077
+      ],
+      "tau": [],
+      "rho": [],
+      "means": [
+        1.0921233977858522,
+        1.3441018525255808,
+        0.740965046765004,
+        -1.195399897308186,
+        -0.9135959617831827,
+        -0.4999718500783213
+      ],
+      "cov": [
+        0.47883998523281834,
+        0.6687010034893378,
+        0.5125247194422765
+      ]
+    },
+    "lpa_eee_k2": {
+      "loglik": -185.67840717512726,
+      "bic": 404.1115708480313,
+      "aic": 387.3568143502545,
+      "n_parameters": 8,
+      "n_analyzed": 60,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 15,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": 1.6709416069868332,
+      "min_eigenvalue": 0.4939983567220412,
+      "min_relative_variance": 0.3445790479633482,
+      "eligible_measurement": true,
+      "delta": [
+        0.4723095405720699,
+        0.52769045942793
+      ],
+      "tau": [],
+      "rho": [],
+      "means": [
+        -1.2583778483903967,
+        -0.954837788563302,
+        1.4531363016062497,
+        1.089998058130656
+      ],
+      "cov": [
+        0.9885183846592847,
+        0.18779449882204974,
+        0.565379840654011
+      ]
+    },
+    "lta_bernoulli_k2_t2": {
+      "loglik": -360.43280046425156,
+      "bic": 756.3918176351399,
+      "aic": 734.8656009285031,
+      "n_parameters": 7,
+      "n_analyzed": 160,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 29,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": null,
+      "cov_ill_conditioned": null,
+      "cov_collapsed_component": null,
+      "condition_number": null,
+      "min_eigenvalue": null,
+      "min_relative_variance": null,
+      "eligible_measurement": true,
+      "delta": [
+        0.4934172557821589,
+        0.5065827442178412
+      ],
+      "tau": [
+        0.9586108903562136,
+        0.04138910964378584,
+        0.13989263442889177,
+        0.8601073655711072
+      ],
+      "rho": [
+        0.9464092330996187,
+        0.0535907669003811,
+        0.16184242599252108,
+        0.8381575740074781,
+        0.8601887775575024,
+        0.13981122244249802,
+        0.1963121643270833,
+        0.8036878356729159
+      ],
+      "means": [],
+      "cov": []
+    },
+    "lpa_vvv_k2_missing": {
+      "loglik": -132.90297626834044,
+      "bic": 308.8382055963905,
+      "aic": 287.8059525366809,
+      "n_parameters": 11,
+      "n_analyzed": 50,
+      "n_best": 3,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 22,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": 13.233428551277724,
+      "min_eigenvalue": 0.03890708250263003,
+      "min_relative_variance": 0.12379271539215857,
+      "eligible_measurement": true,
+      "delta": [
+        0.7433167104720133,
+        0.25668328952798664
+      ],
+      "tau": [],
+      "rho": [],
+      "means": [
+        -0.7137660394386568,
+        0.05185671871642128,
+        1.289364398549418,
+        1.1920045168345428
+      ],
+      "cov": [
+        1.0594861328868983,
+        0.9360086411391024,
+        1.940646181440061,
+        0.39311980006865754,
+        -0.25044175171666644,
+        0.21597884727127017
+      ]
+    }
+  },
+  "profylr": {
+    "lca_bernoulli_k2": {
+      "loglik": -183.94857785940184,
+      "bic": 407.33539543086863,
+      "aic": 385.8971557188037,
+      "n_parameters": 9,
+      "n_analyzed": 80,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 18,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": null,
+      "min_eigenvalue": null,
+      "min_relative_variance": null,
+      "eligible_measurement": true,
+      "delta": [
+        0.4569727927853416,
+        0.5430272072146585
+      ],
+      "tau": [],
+      "rho": [
+        0.14491417846942148,
+        0.8550858215305781,
+        0.9369294142006316,
+        0.06307058579936853,
+        0.18301377702485422,
+        0.8169862229751453,
+        0.8127911038908332,
+        0.18720889610916697,
+        0.7251615526086147,
+        0.27483844739138485,
+        0.26448195997500673,
+        0.7355180400249934,
+        0.8533095429085763,
+        0.14669045709142345,
+        0.08758447907359454,
+        0.9124155209264054
+      ],
+      "means": [],
+      "cov": []
+    },
+    "lpa_eei_k2": {
+      "loglik": -318.55960836510616,
+      "bic": 680.9394830769511,
+      "aic": 657.1192167302123,
+      "n_parameters": 10,
+      "n_analyzed": 80,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 13,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": 1.0000000000000004,
+      "min_eigenvalue": 0.47883998523281834,
+      "min_relative_variance": 0.2811088395029175,
+      "eligible_measurement": true,
+      "delta": [
+        0.35839580347289235,
+        0.6416041965271077
+      ],
+      "tau": [],
+      "rho": [],
+      "means": [
+        1.0921233977858522,
+        1.3441018525255808,
+        0.740965046765004,
+        -1.195399897308186,
+        -0.9135959617831827,
+        -0.4999718500783213
+      ],
+      "cov": [
+        0.47883998523281834,
+        0.6687010034893378,
+        0.5125247194422765
+      ]
+    },
+    "lpa_eee_k2": {
+      "loglik": -185.67840717512726,
+      "bic": 404.1115708480313,
+      "aic": 387.3568143502545,
+      "n_parameters": 8,
+      "n_analyzed": 60,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 15,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": 1.6709416069868332,
+      "min_eigenvalue": 0.4939983567220412,
+      "min_relative_variance": 0.3445790479633482,
+      "eligible_measurement": true,
+      "delta": [
+        0.4723095405720699,
+        0.52769045942793
+      ],
+      "tau": [],
+      "rho": [],
+      "means": [
+        -1.2583778483903967,
+        -0.954837788563302,
+        1.4531363016062497,
+        1.089998058130656
+      ],
+      "cov": [
+        0.9885183846592847,
+        0.18779449882204974,
+        0.565379840654011
+      ]
+    },
+    "lta_bernoulli_k2_t2": {
+      "loglik": -360.43280046425156,
+      "bic": 756.3918176351399,
+      "aic": 734.8656009285031,
+      "n_parameters": 7,
+      "n_analyzed": 160,
+      "n_best": 4,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 29,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": null,
+      "min_eigenvalue": null,
+      "min_relative_variance": null,
+      "eligible_measurement": true,
+      "delta": [
+        0.4934172557821589,
+        0.5065827442178412
+      ],
+      "tau": [
+        0.9586108903562136,
+        0.04138910964378584,
+        0.13989263442889177,
+        0.8601073655711072
+      ],
+      "rho": [
+        0.9464092330996187,
+        0.0535907669003811,
+        0.16184242599252108,
+        0.8381575740074781,
+        0.8601887775575024,
+        0.13981122244249802,
+        0.1963121643270833,
+        0.8036878356729159
+      ],
+      "means": [],
+      "cov": []
+    },
+    "lpa_vvv_k2_missing": {
+      "loglik": -132.90297626834044,
+      "bic": 308.8382055963905,
+      "aic": 287.8059525366809,
+      "n_parameters": 11,
+      "n_analyzed": 50,
+      "n_best": 3,
+      "n_starts": 40,
+      "n_full": 4,
+      "n_iter": 22,
+      "converged": true,
+      "status": "ok",
+      "status_reason": "ok",
+      "regularized": false,
+      "n_boundary": 0,
+      "cov_positive_definite": true,
+      "cov_ill_conditioned": false,
+      "cov_collapsed_component": false,
+      "condition_number": 13.233428551277724,
+      "min_eigenvalue": 0.03890708250263003,
+      "min_relative_variance": 0.12379271539215857,
+      "eligible_measurement": true,
+      "delta": [
+        0.7433167104720133,
+        0.25668328952798664
+      ],
+      "tau": [],
+      "rho": [],
+      "means": [
+        -0.7137660394386568,
+        0.05185671871642128,
+        1.289364398549418,
+        1.1920045168345428
+      ],
+      "cov": [
+        1.0594861328868983,
+        0.9360086411391024,
+        1.940646181440061,
+        0.39311980006865754,
+        -0.25044175171666644,
+        0.21597884727127017
+      ]
+    }
+  },
+  "profylr_pyfylr_max_abs": 0.0,
+  "printed_mplus_comparison": [
+    {
+      "name": "lca_bernoulli_k2",
+      "mplus_loglik_printed": -183.949,
+      "package_loglik": -183.94857785940184,
+      "loglik_minus_printed": 0.00042214059817524685,
+      "mplus_bic_printed": 407.335,
+      "package_bic": 407.33539543086863,
+      "free_parameters": 9,
+      "n_best": 4,
+      "status": "ok"
+    },
+    {
+      "name": "lpa_eee_k2",
+      "mplus_loglik_printed": -185.678,
+      "package_loglik": -185.67840717512726,
+      "loglik_minus_printed": -0.00040717512726473615,
+      "mplus_bic_printed": 404.112,
+      "package_bic": 404.1115708480313,
+      "free_parameters": 8,
+      "n_best": 4,
+      "status": "ok"
+    },
+    {
+      "name": "lpa_eei_k2",
+      "mplus_loglik_printed": -318.56,
+      "package_loglik": -318.55960836510616,
+      "loglik_minus_printed": 0.000391634893844639,
+      "mplus_bic_printed": 680.939,
+      "package_bic": 680.9394830769511,
+      "free_parameters": 10,
+      "n_best": 4,
+      "status": "ok"
+    },
+    {
+      "name": "lta_bernoulli_k2_t2",
+      "mplus_loglik_printed": -360.433,
+      "package_loglik": -360.43280046425156,
+      "loglik_minus_printed": 0.00019953574843611932,
+      "mplus_bic_printed": 756.392,
+      "package_bic": 756.3918176351399,
+      "free_parameters": 7,
+      "n_best": 4,
+      "status": "ok"
+    },
+    {
+      "name": "lpa_vvv_k2_missing",
+      "mplus_loglik_printed": -132.903,
+      "package_loglik": -132.90297626834044,
+      "loglik_minus_printed": 2.3731659553050122e-05,
+      "mplus_bic_printed": 308.838,
+      "package_bic": 308.8382055963905,
+      "free_parameters": 11,
+      "n_best": 3,
+      "status": "ok"
+    }
+  ],
+  "aligned_absolute_differences": {
+    "lta_bernoulli_k2_t2": {
+      "permutation_new_to_old": [
+        1,
+        0
+      ],
+      "cost": 6.507696619532394e-07,
+      "ambiguous": false,
+      "response_probabilities": 0.00040923309961889837,
+      "initial": 0.00041725578215889847,
+      "transition": 0.00038910964378635615,
+      "aligned_initial": [
+        0.5065827442178412,
+        0.4934172557821589
+      ],
+      "aligned_transition": [
+        0.8601073655711072,
+        0.13989263442889177,
+        0.04138910964378584,
+        0.9586108903562136
+      ],
+      "aligned_response_p1": [
+        0.8381575740074781,
+        0.0535907669003811,
+        0.8036878356729159,
+        0.13981122244249802
+      ],
+      "mplus_response_p1_u1_u2_by_state": [
+        0.838,
+        0.054,
+        0.804,
+        0.14
+      ]
+    },
+    "lpa_vvv_k2_missing": {
+      "alignment": "smaller class matched to Mplus class 1; means were not printed, so the Hungarian measurement-profile distance is not identified",
+      "initial": 0.00031671047201337066,
+      "reported_covariance": 0.00044175171666643864,
+      "aligned_proportions_class1_class2": [
+        0.25668328952798664,
+        0.7433167104720133
+      ],
+      "aligned_covariance_class1": -0.25044175171666644,
+      "condition_number": 13.233428551277724,
+      "min_eigenvalue": 0.03890708250263003,
+      "positive_definite": true,
+      "ill_conditioned": false,
+      "collapsed": false,
+      "regularized": false,
+      "n_boundary": 0
+    }
+  },
+  "vvv_replication_after_init_change": {
+    "n_starts_20_n_full_4": {
+      "counts": {
+        "mplus_replicated": 8,
+        "mplus_once": 8,
+        "mid_replicated": 2,
+        "higher_once": 2
+      },
+      "not_replicated_mplus": [
+        {
+          "seed": 4,
+          "class": "mplus_once",
+          "loglik": -132.90297651974507,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 5,
+          "class": "mplus_once",
+          "loglik": -132.90297616335124,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 7,
+          "class": "mplus_once",
+          "loglik": -132.9029766034893,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 9,
+          "class": "higher_once",
+          "loglik": -131.24796743331905,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 10,
+          "class": "mplus_once",
+          "loglik": -132.90297629596077,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 11,
+          "class": "mplus_once",
+          "loglik": -132.90297670452713,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 15,
+          "class": "mplus_once",
+          "loglik": -132.90297665463467,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 18,
+          "class": "mplus_once",
+          "loglik": -132.9029764004923,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 19,
+          "class": "mplus_once",
+          "loglik": -132.90297626072908,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 20,
+          "class": "higher_once",
+          "loglik": -131.2479675221686,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        }
+      ]
+    },
+    "n_starts_40_n_full_4": {
+      "counts": {
+        "mplus_replicated": 14,
+        "mplus_once": 3,
+        "higher_once": 2,
+        "ridged": 1
+      },
+      "not_replicated_mplus": [
+        {
+          "seed": 4,
+          "class": "mplus_once",
+          "loglik": -132.90297651330079,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 9,
+          "class": "higher_once",
+          "loglik": -131.24796743331905,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 10,
+          "class": "ridged",
+          "loglik": -127.17101006049597,
+          "n_best": 0,
+          "status": "unusable",
+          "status_reason": "not_converged,best_loglik_not_replicated,variance_floor"
+        },
+        {
+          "seed": 12,
+          "class": "mplus_once",
+          "loglik": -132.90297622532617,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 19,
+          "class": "mplus_once",
+          "loglik": -132.90297626072908,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        },
+        {
+          "seed": 20,
+          "class": "higher_once",
+          "loglik": -131.2479675221686,
+          "n_best": 1,
+          "status": "unusable",
+          "status_reason": "best_loglik_not_replicated"
+        }
+      ]
+    }
+  },
+  "vvv_replication_before": {
+    "core": "6e83020, diagonal covariance copied into every random VVV start",
+    "policy": "n_starts=20, screen_iter=10, n_full=4",
+    "seeds_1_to_10": "selected loglik -133.809 on seeds 1-6, 8, 9 (replicated); -133.155 on seeds 7 and 10 (n_best=1). -132.903 was not selected.",
+    "why": "At iteration 10 the start that later reaches -132.903 is still near -142 to -144 and ranks near the bottom. It is visible as the best start only after about 20 to 40 iterations. Full EM, screen_iter=0, n_starts=40: seed 1 reached it 1/40, seed 11 reached it 2/40, seed 20261025 reached it 1/40."
+  },
+  "hungarian_alignment": {
+    "controls": "seed 1, n_starts 40, screen_iter 10, n_full 4, max_iter 200, tol 1e-8, replicate_tol 1e-3, align_labels false, one thread",
+    "reference": "Mplus MODEL RESULTS. Thresholds converted by P(u=1)=1/(1+exp(threshold)). Class proportion of class 1 is exp(C#1)/(1+exp(C#1)). Derived from the printed three-decimal figures, then Hungarian-aligned. Covariances are not in the distance; they are differenced after the permutation.",
+    "models": {
+      "lca_bernoulli_k2": {
+        "permutation_new_to_old": [
+          0,
+          1
+        ],
+        "cost": 7.025141e-08,
+        "ambiguous": false,
+        "max_abs": {
+          "class_proportion": 0.0001329039,
+          "response_probability": 0.0001314164,
+          "transition": null,
+          "mean": null,
+          "variance": null,
+          "covariance": null
+        }
+      },
+      "lpa_eee_k2": {
+        "permutation_new_to_old": [
+          1,
+          0
+        ],
+        "cost": 8.022576e-08,
+        "ambiguous": false,
+        "max_abs": {
+          "class_proportion": 3.087988e-05,
+          "response_probability": null,
+          "transition": null,
+          "mean": 0.0004111788,
+          "variance": 0.0004801447,
+          "covariance": 0.0001709551
+        }
+      },
+      "lpa_eei_k2": {
+        "permutation_new_to_old": [
+          1,
+          0
+        ],
+        "cost": 1.982555e-07,
+        "ambiguous": false,
+        "max_abs": {
+          "class_proportion": 7.672017e-05,
+          "response_probability": null,
+          "transition": null,
+          "mean": 0.0004040382,
+          "variance": 0.0004752806,
+          "covariance": null
+        }
+      },
+      "lta_bernoulli_k2_t2": {
+        "permutation_new_to_old": [
+          1,
+          0
+        ],
+        "cost": 6.507697e-07,
+        "ambiguous": false,
+        "max_abs": {
+          "class_proportion": 0.0004172558,
+          "response_probability": 0.0004092331,
+          "transition": 0.0003891096,
+          "mean": null,
+          "variance": null,
+          "covariance": null
+        }
+      },
+      "lpa_vvv_k2_missing": {
+        "permutation_new_to_old": [
+          1,
+          0
+        ],
+        "cost": 1.229413e-07,
+        "ambiguous": false,
+        "loglik": -132.9029762683,
+        "note": "Mplus class 1 is the smaller class (C#1=-1.064). The permutation puts that class first.",
+        "max_abs": {
+          "class_proportion": 0.0001374977,
+          "class_proportion_vs_rounded_print_0.257_0.743": 0.0003167105,
+          "response_probability": null,
+          "transition": null,
+          "mean": 0.0003643985,
+          "variance": 0.0005138671,
+          "covariance": 0.0004417517
+        }
+      }
+    }
+  }
+}

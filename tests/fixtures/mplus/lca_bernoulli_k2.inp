@@ -1,0 +1,19 @@
+TITLE:
+  Release 1: 2-class Bernoulli LCA, 4 items. 9 free parameters.
+  No covariate and no known class.
+  Mplus 8 for Mac, MLR, STARTS 40 10. User run, 25 October 2026.
+DATA: FILE = lca_bernoulli_k2.dat;
+VARIABLE:
+  NAMES = u1 u2 u3 u4;
+  USEVARIABLES = u1-u4;
+  CATEGORICAL = u1-u4;
+  CLASSES = c(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = MLR;
+  STARTS = 40 10;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  [c#1];
+OUTPUT: TECH1;

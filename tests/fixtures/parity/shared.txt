@@ -1,0 +1,10 @@
+loglik -27.725887222397784
+n_starts 3
+n_parameters 5
+permutation 0 1
+ambiguous 0
+cost 0.079999999999999988
+aligned_p1 1 2.4598950862095677e-52 1 2.4598950862095677e-52
+add_n_starts 4
+add_loglik -27.725887222397784
+add_n_best 3

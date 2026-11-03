@@ -1,0 +1,83 @@
+Third-party notices for pyfylr
+
+pyfylr itself is Copyright (c) 2026 David S. Cassell and is MIT licensed.
+See LICENSE.
+
+Eigen 3.4.0
+-----------
+The _core extension compiles Eigen 3.4.0 headers. Eigen's COPYING.README says
+Eigen is primarily MPL-2.0 and that some files contain third-party code under
+BSD or LGPL licenses. This wheel reproduces the Eigen 3.4.0 texts. They are
+members of *.dist-info/licenses/, at:
+
+- _staged_core/vendor/Eigen/COPYING.MPL2
+- _staged_core/vendor/Eigen/COPYING.BSD
+- _staged_core/vendor/Eigen/COPYING.APACHE
+- _staged_core/vendor/Eigen/COPYING.LGPL
+- _staged_core/vendor/Eigen/COPYING.README
+
+The same bytes are in the source distribution at _staged_core/vendor/Eigen/.
+
+Source availability for the executable form (MPL 2.0 section 3.2): the Source
+Code Form of the Eigen files compiled into this wheel is that
+_staged_core/vendor/Eigen tree in the pyfylr source distribution of the same
+version. Those files were taken from the Eigen 3.4.0 release. A recipient of
+this wheel can obtain that source from the matching pyfylr source
+distribution, or from the upstream Eigen 3.4.0 archive:
+
+https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.bz2
+
+The tag page is https://gitlab.com/libeigen/eigen/-/tags/3.4.0.
+
+Parts that are not MPL-2.0 alone:
+
+- Intel Corporation, 2011, BSD-3-Clause, on the MKL/LAPACKE binding headers.
+  The text is COPYING.BSD.
+- Willow Garage, Inc. (2011-2014) and Open Source Robotics Foundation
+  (2014-2015), BSD-3-Clause, on AlignedBox::transform.
+- TensorFlow Authors, 2017, Apache-2.0, on BFloat16.h. The Apache-2.0 text
+  is COPYING.APACHE.
+- Intel Corporation, 2001, permissive notice on the 4x4 inverse in
+  InverseSize4.h. The header keeps that notice.
+- IncompleteLUT.h is MPL-2.0. Its header says the implementation is derived
+  from the LGPL SPARSKIT ILUT and that Yousef Saad permitted relicensing that
+  implementation to MPL2 (Eigen mailing list, 8 July 2012). COPYING.LGPL is
+  the upstream LGPL 2.1 text, retained unchanged because COPYING.README names
+  it. It is not a claim that IncompleteLUT.h remains LGPL.
+
+Four Eigen headers have no license header of their own:
+src/Core/arch/HIP/hcc/math_constants.h, src/misc/blas.h, src/misc/lapack.h,
+and src/misc/lapacke_mangling.h. They are shipped as part of Eigen 3.4.0 and
+are covered by the COPYING files above.
+
+pybind11
+--------
+Binary wheels compile pybind11 headers into the _core extension. pybind11 is
+not vendored as source. It is BSD-3-Clause. The pybind11 2.13.6 LICENSE reads:
+
+Copyright (c) 2016 Wenzel Jakob <wenzel.jakob@epfl.ch>, All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

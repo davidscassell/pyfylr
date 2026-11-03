@@ -1,0 +1,24 @@
+TITLE:
+  VVV k=2 missing, STARTS 500 100. Not run. Same data as the 40 10 input.
+DATA: FILE = lpa_vvv_k2_missing.dat;
+VARIABLE:
+  NAMES = y1 y2;
+  USEVARIABLES = y1-y2;
+  MISSING = .;
+  CLASSES = c(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = MLR;
+  STARTS = 500 100;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  %c#1%
+  [y1 y2];
+  y1 y2;
+  y1 WITH y2;
+  %c#2%
+  [y1 y2];
+  y1 y2;
+  y1 WITH y2;
+OUTPUT: TECH1 TECH8;

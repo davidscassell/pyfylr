@@ -1,0 +1,25 @@
+TITLE:
+  Release 1: 2-class Gaussian LPA, EEI. 10 free parameters.
+  Class-specific means. One shared diagonal covariance.
+  Mplus 8 for Mac, MLR, STARTS 40 10. User run, 25 October 2026.
+DATA: FILE = lpa_eei_k2.dat;
+VARIABLE:
+  NAMES = y1 y2 y3;
+  USEVARIABLES = y1-y3;
+  CLASSES = c(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = MLR;
+  STARTS = 40 10;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  y1-y3 (v1-v3);
+  y1 WITH y2@0;
+  y1 WITH y3@0;
+  y2 WITH y3@0;
+  %c#1%
+  [y1 y2 y3];
+  %c#2%
+  [y1 y2 y3];
+OUTPUT: TECH1;

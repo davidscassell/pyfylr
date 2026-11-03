@@ -1,0 +1,214 @@
+{
+  "provenance": {
+    "software": "Mplus 8 for Mac",
+    "estimator": "MLR",
+    "starts": "40 10",
+    "processors": 1,
+    "run_by": "the user",
+    "run_date": "2026-10-25",
+    "source_inputs": "fixtures/mplus at 5419f4921d1f34a451dc03fd619c154cd380ad71",
+    "data_change": "lpa_vvv_k2_missing.dat had seven nan cells, on lines 2, 7, 9, 19, 25, 40 and 47, replaced by . so the file matches MISSING = .;"
+  },
+  "models": [
+    {
+      "name": "lca_bernoulli_k2",
+      "free_parameters": 9,
+      "h0_loglik": -183.949,
+      "bic": 407.335,
+      "best_replicated": "10/10",
+      "parameters_printed": true,
+      "printed": {
+        "C#1": -0.172,
+        "thresholds_class_1": [
+          -1.774,
+          -1.496,
+          0.97,
+          1.76
+        ],
+        "thresholds_class_2": [
+          2.699,
+          1.468,
+          -1.023,
+          -2.344
+        ],
+        "item_order": [
+          "U1",
+          "U2",
+          "U3",
+          "U4"
+        ]
+      },
+      "derived_from_printed": {
+        "note": "Derived probabilities are computed from the printed three-decimal MODEL RESULTS, not from a higher-precision Mplus dump. P(u=1)=1/(1+exp(threshold)); the threshold is the logit of P(u=0). P(class 1)=exp(C#1)/(1+exp(C#1)); P(class 2)=1/(1+exp(C#1)).",
+        "class_proportions": [
+          0.4571056966513691,
+          0.542894303348631
+        ],
+        "response_probability_class_1": [
+          0.8549544051535856,
+          0.8169771323772221,
+          0.2748805022101769,
+          0.14679033980138237
+        ],
+        "response_probability_class_2": [
+          0.06303238956377631,
+          0.18724679446465686,
+          0.7355565510232094,
+          0.9124561325209217
+        ]
+      }
+    },
+    {
+      "name": "lpa_eee_k2",
+      "free_parameters": 8,
+      "h0_loglik": -185.678,
+      "bic": 404.112,
+      "best_replicated": "10/10",
+      "parameters_printed": true,
+      "printed": {
+        "C#1": -0.111,
+        "means_class_1": [
+          -1.259,
+          -0.955
+        ],
+        "means_class_2": [
+          1.453,
+          1.09
+        ],
+        "variance_Y1": 0.988,
+        "variance_Y2": 0.565,
+        "Y1_WITH_Y2": 0.188,
+        "covariance": "shared across classes"
+      },
+      "derived_from_printed": {
+        "note": "Derived probabilities are computed from the printed three-decimal MODEL RESULTS, not from a higher-precision Mplus dump. P(u=1)=1/(1+exp(threshold)); the threshold is the logit of P(u=0). P(class 1)=exp(C#1)/(1+exp(C#1)); P(class 2)=1/(1+exp(C#1)).",
+        "class_proportions": [
+          0.47227845725083545,
+          0.5277215427491645
+        ]
+      }
+    },
+    {
+      "name": "lpa_eei_k2",
+      "free_parameters": 10,
+      "h0_loglik": -318.56,
+      "bic": 680.939,
+      "best_replicated": "10/10",
+      "parameters_printed": true,
+      "printed": {
+        "C#1": 0.582,
+        "means_class_1": [
+          -1.195,
+          -0.914,
+          -0.5
+        ],
+        "means_class_2": [
+          1.092,
+          1.344,
+          0.741
+        ],
+        "variances": [
+          0.479,
+          0.669,
+          0.513
+        ],
+        "covariance": "shared across classes, diagonal"
+      },
+      "derived_from_printed": {
+        "note": "Derived probabilities are computed from the printed three-decimal MODEL RESULTS, not from a higher-precision Mplus dump. P(u=1)=1/(1+exp(threshold)); the threshold is the logit of P(u=0). P(class 1)=exp(C#1)/(1+exp(C#1)); P(class 2)=1/(1+exp(C#1)).",
+        "class_proportions": [
+          0.6415274763534318,
+          0.3584725236465682
+        ]
+      }
+    },
+    {
+      "name": "lta_bernoulli_k2_t2",
+      "free_parameters": 7,
+      "h0_loglik": -360.433,
+      "bic": 756.392,
+      "best_replicated": "10/10",
+      "parameters_printed": true,
+      "note": "Item order is u1 then u2, the order named in the input. State 1 is the high response-probability state.",
+      "initial": [
+        0.507,
+        0.493
+      ],
+      "c2_on_c1": {
+        "intercept": -3.145,
+        "c2_1_on_c1_1": 4.962
+      },
+      "transition_from_state": [
+        [
+          0.86,
+          0.14
+        ],
+        [
+          0.041,
+          0.959
+        ]
+      ],
+      "response_probability_u1": {
+        "state_1": 0.838,
+        "state_2": 0.054
+      },
+      "response_probability_u2": {
+        "state_1": 0.804,
+        "state_2": 0.14
+      },
+      "measurement": "invariant across waves"
+    },
+    {
+      "name": "lpa_vvv_k2_missing",
+      "free_parameters": 11,
+      "h0_loglik": -132.903,
+      "bic": 308.838,
+      "best_replicated": "1/10",
+      "parameters_printed": true,
+      "class_proportions": [
+        0.257,
+        0.743
+      ],
+      "class_1_covariance": -0.25,
+      "information_matrix_condition_number": 0.00024,
+      "note": "Mplus reached -132.903 once, -133.155 four times and -133.809 five times among the final-stage starts. The information-matrix condition number is Mplus's, not the correlation condition number used in this core. An independent FIML evaluation at the Mplus estimates is -132.9032. MODEL RESULTS means, variances, and WITH were printed and are stored under printed. class_proportions 0.257/0.743 is the rounded proportion printout; derived_from_printed uses C#1.",
+      "final_stage_loglik_counts": {
+        "-132.903": 1,
+        "-133.155": 4,
+        "-133.809": 5
+      },
+      "printed": {
+        "C#1": -1.064,
+        "means_class_1": [
+          1.289,
+          1.192
+        ],
+        "means_class_2": [
+          -0.714,
+          0.052
+        ],
+        "variances_class_1": [
+          0.393,
+          0.216
+        ],
+        "variances_class_2": [
+          1.06,
+          1.941
+        ],
+        "Y1_WITH_Y2_class_1": -0.25,
+        "Y1_WITH_Y2_class_2": 0.936
+      },
+      "derived_from_printed": {
+        "note": "Derived probabilities are computed from the printed three-decimal MODEL RESULTS, not from a higher-precision Mplus dump. P(u=1)=1/(1+exp(threshold)); the threshold is the logit of P(u=0). P(class 1)=exp(C#1)/(1+exp(C#1)); P(class 2)=1/(1+exp(C#1)).",
+        "class_proportions": [
+          0.2565457918536561,
+          0.7434542081463438
+        ]
+      },
+      "class_proportions_printed": [
+        0.257,
+        0.743
+      ]
+    }
+  ]
+}

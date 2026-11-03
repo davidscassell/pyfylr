@@ -1,0 +1,26 @@
+TITLE:
+  TECH14 input, not yet run. 2-class Bernoulli LCA, 4 items.
+  Same MODEL as lca_bernoulli_k2.inp. H0 is the 1-class model.
+  ESTIMATOR=ML so TECH14 is the parametric bootstrap LRT.
+  STARTS and LRTSTARTS match the profylr blrt_check call:
+  20 initial starts, 4 final optimizations, on H0 and on H1.
+  LRTBOOTSTRAP = 100. PROCESSORS = 1.
+  profylr's p-value on lca_bernoulli_k2.dat is in docs/evidence-r1.md.
+  That comparison is not a validation. BLRT stays off in select_model.
+DATA: FILE = lca_bernoulli_k2.dat;
+VARIABLE:
+  NAMES = u1 u2 u3 u4;
+  USEVARIABLES = u1-u4;
+  CATEGORICAL = u1-u4;
+  CLASSES = c(2);
+ANALYSIS:
+  TYPE = MIXTURE;
+  ESTIMATOR = ML;
+  STARTS = 20 4;
+  LRTSTARTS = 20 4 20 4;
+  LRTBOOTSTRAP = 100;
+  PROCESSORS = 1;
+MODEL:
+  %OVERALL%
+  [c#1];
+OUTPUT: TECH14;
