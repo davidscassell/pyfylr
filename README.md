@@ -1,16 +1,42 @@
 # pyfylr
 
-Latent profile, latent class, and latent transition models for Python. Release 1 estimates a first-order discrete-time Markov model with a shared C++17 core (Eigen 3.4.0, no external BLAS). The same core is used by the R package profylr.
+Latent profile, latent class, and latent transition models for Python. Release 1 estimates a first-order discrete-time Markov model with a C++17 core (Eigen 3.4.0, no external BLAS). The same core is used by [profylr](https://github.com/davidscassell/profylr).
+
+**BLRT is experimental and unvalidated.** `selection_rule()` keeps `blrt=False`, and a fitted model keeps `validated=False`. Do not use the bootstrap likelihood-ratio test for automatic model selection.
+
+## Install
+
+This repository contains the package and the C++ sources it compiles, under `_staged_core`. Python 3.11, 3.12, or 3.13. NumPy is at least 2.0 on 3.11 and 3.12, and at least 2.1 on 3.13. pandas is at least 2.2.3. The build uses pybind11 at least 2.13, CMake, and a C++17 compiler. From a checkout:
+
+```bash
+pip install .
+pytest
+```
+
+`pytest` needs the optional plot and scikit-learn extras (`pip install ".[plot,sklearn]" pytest`). Release 1 supports Linux x86_64 and Apple Silicon. Windows and Intel Mac are deferred and are not supported release targets.
+
+The defaults are 40 random starts, a screen of 10, 4 full starts, `max_iter=200`, and `tol=1e-7`. Eigen's own multithreading is disabled. Random starts use private streams derived from the master seed, so one thread and several threads return the same fit.
+
+## Example
 
 ```python
+import numpy as np
+import pandas as pd
 import pyfylr as pf
 
-fit = pf.fit_lta(data, indicators=["u1", "u2", "y"], id="id", wave="wave",
-                 n_states=3, family={"u1": "bernoulli", "u2": "nominal", "y": "gaussian"},
-                 covariance="VVV")
+rng = np.random.default_rng(1)
+y = np.concatenate([rng.normal(-1, 0.5, 30), rng.normal(1, 0.5, 30)])
+ex = pd.DataFrame({"y1": y, "y2": y + rng.normal(0, 0.3, 60)})
+fit = pf.fit_lpa(ex, ["y1", "y2"], n_states=2, covariance="EEI")
 fit.glance()
-fit.tidy()
-fit.augment()
+```
+
+A longitudinal call has the same defaults:
+
+```python
+pf.fit_lta(data, indicators=["u1", "u2", "y"], id="id", wave="wave",
+           n_states=3, family={"u1": "bernoulli", "u2": "nominal", "y": "gaussian"},
+           covariance="VVV")
 ```
 
 A cross-section is `fit_lpa` or `fit_lca`, or `data.pyfylr.fit_lpa(...)`.
@@ -34,13 +60,4 @@ The fit records `engine="cpp-em"`, an empty draws slot, `interval_type="none"`, 
 
 `save_model` stores an analyst selection or a comparison table. Saving a fitted model, including parameters and a way to score new rows from that file, is deferred. `predict` and `predict_proba` on the scikit-learn estimators score new rows from a model that is still in memory. The R package does not have that new-data prediction method in this release.
 
-## Build
-
-Release 1 supports Linux x86_64 and Apple Silicon. Windows and Intel Mac are deferred and are not supported release targets. Python 3.11, 3.12, or 3.13. NumPy is at least 2.0 on 3.11 and 3.12, and at least 2.1 on 3.13. pandas is at least 2.2.3. The build uses pybind11 at least 2.13. From the monorepo root, with a C++17 compiler and CMake:
-
-```bash
-pip install --no-build-isolation -e pyfylr
-pytest pyfylr/tests
-```
-
-An editable install reads the C++ core from `../core`. The sdist vendors that core as `_staged_core` (`src/lta.cpp`, `src/describe.cpp`, `include/lta`, and `vendor/Eigen`), so `pip wheel` of the sdist does not need the monorepo beside it. Eigen's own multithreading is disabled. Random starts use private streams derived from the master seed, so one thread and several threads return the same fit.
+Repository: <https://github.com/davidscassell/pyfylr>
