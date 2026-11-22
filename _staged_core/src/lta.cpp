@@ -36,6 +36,57 @@ static_assert(EIGEN_WORLD_VERSION == 3 && EIGEN_MAJOR_VERSION == 4 &&
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr double kPi = 3.14159265358979323846;
+// Contiguous analyzed-subject blocks. Boundaries use this length and the
+// analyzed count only, never estep_threads.
+constexpr int kEstepBlockSubjects = 32;
+
+// Set only while a multi-thread WorkerPool job is running. An E-step on that
+// thread stays serial so start workers and BLRT workers do not spawn more
+// threads. A one-thread pool runs inline and does not set this.
+thread_local int g_pool_worker_depth = 0;
+
+void require_estep_threads(const Spec& spec) {
+    if (spec.estep_threads < 1 || spec.estep_threads > kMaxEstepThreads)
+        throw std::invalid_argument("estep_threads must be a finite whole number from 1 to 1024");
+}
+
+void require_patterns(const Spec& spec, const IndicatorLayout& layout) {
+    if (spec.patterns == PATTERNS_NONE) return;
+    if (spec.patterns != PATTERNS_COMPRESS)
+        throw std::invalid_argument("patterns must be \"none\" or \"compress\"");
+    if (layout.measurement != MEAS_CATEGORICAL || layout.n_gaussian != 0)
+        throw std::invalid_argument(
+            "patterns=\"compress\" is implemented for categorical models only. "
+            "Gaussian and mixed models stay on patterns=\"none\".");
+}
+
+int estep_threads_effective(const Spec& s) {
+    require_estep_threads(s);
+    if (s.estep_threads <= 1 || g_pool_worker_depth > 0 || s.n_threads > 1) return 1;
+    return s.estep_threads;
+}
+
+struct PoolWorkerGuard {
+    PoolWorkerGuard() { ++g_pool_worker_depth; }
+    ~PoolWorkerGuard() { --g_pool_worker_depth; }
+};
+
+// std::thread::~thread calls std::terminate while the thread is still
+// joinable. This joins every thread that was started, including when a later
+// launch throws, before the vector is destroyed. Worker exceptions are stored
+// by the job and rethrown on the calling thread after join().
+struct JoinedThreads {
+    std::vector<std::thread> threads;
+    JoinedThreads() = default;
+    JoinedThreads(const JoinedThreads&) = delete;
+    JoinedThreads& operator=(const JoinedThreads&) = delete;
+    ~JoinedThreads() { join(); }
+    void join() {
+        for (std::thread& th : threads) {
+            if (th.joinable()) th.join();
+        }
+    }
+};
 
 struct PCG {
     std::uint64_t state;
@@ -393,9 +444,10 @@ GaussFactor& factor_for(FactorCache& cache, int t, int k, std::uint64_t mask,
 }
 
 double log_gauss_obs(const double* y, const double* mu, const Eigen::MatrixXd& Sigma, int J,
-                     FactorCache& cache, int tkey, int kkey, bool* regularized) {
-    std::vector<int> obs;
-    obs.reserve(J);
+                     FactorCache& cache, int tkey, int kkey, bool* regularized,
+                     std::vector<int>& obs, Eigen::VectorXd& resid) {
+    obs.clear();
+    if (obs.capacity() < static_cast<std::size_t>(J)) obs.reserve(static_cast<std::size_t>(J));
     std::uint64_t mask = 0;
     for (int j = 0; j < J; ++j) {
         if (std::isfinite(y[j])) {
@@ -406,20 +458,23 @@ double log_gauss_obs(const double* y, const double* mu, const Eigen::MatrixXd& S
     if (obs.empty()) return 0.0;
     GaussFactor& g = factor_for(cache, tkey, kkey, mask, Sigma, obs, regularized);
     const int p = static_cast<int>(obs.size());
-    Eigen::VectorXd d(p);
-    for (int a = 0; a < p; ++a) d(a) = y[obs[a]] - mu[obs[a]];
-    Eigen::VectorXd z = g.L.triangularView<Eigen::Lower>().solve(d);
+    if (resid.size() != p) resid.resize(p);
+    for (int a = 0; a < p; ++a) resid(a) = y[obs[a]] - mu[obs[a]];
+    Eigen::VectorXd z = g.L.triangularView<Eigen::Lower>().solve(resid);
     const double quad = z.squaredNorm();
     return -0.5 * (p * std::log(2.0 * kPi) + g.logdet + quad);
 }
 
 void conditional_moments(const double* y, const double* mu, const Eigen::MatrixXd& Sigma, int J,
                          Eigen::VectorXd& ey, Eigen::MatrixXd& Eyy, FactorCache& cache, int tkey,
-                         int kkey, bool* regularized) {
-    std::vector<int> o, m;
+                         int kkey, bool* regularized, std::vector<int>& o, std::vector<int>& m,
+                         Eigen::VectorXd& diff, Eigen::MatrixXd& Cov) {
+    o.clear();
+    m.clear();
     for (int j = 0; j < J; ++j) (std::isfinite(y[j]) ? o : m).push_back(j);
     ey.resize(J);
     Eyy.setZero(J, J);
+    Cov.setZero(J, J);
     for (int j = 0; j < J; ++j) ey(j) = mu[j];
     if (o.empty()) return;
     std::uint64_t mask = 0;
@@ -427,12 +482,11 @@ void conditional_moments(const double* y, const double* mu, const Eigen::MatrixX
     GaussFactor& g = factor_for(cache, tkey, kkey, mask, Sigma, o, regularized);
     const int no = static_cast<int>(o.size());
     const int nm = static_cast<int>(m.size());
-    Eigen::VectorXd diff(no);
+    if (diff.size() != no) diff.resize(no);
     for (int a = 0; a < no; ++a) {
         diff(a) = y[o[a]] - mu[o[a]];
         ey(o[a]) = y[o[a]];
     }
-    Eigen::MatrixXd Cov = Eigen::MatrixXd::Zero(J, J);
     if (nm) {
         if (!g.conditional_ready) {
             Eigen::MatrixXd Smo(nm, no), Smm(nm, nm);
@@ -499,6 +553,16 @@ struct EmWorkspace {
     std::vector<double> log_tau;
     std::vector<double> logxi;
     std::vector<double> ybuf;
+    std::vector<double> center_cur;
+    std::vector<double> center_nxt;
+    std::vector<double> center_loga;
+    std::vector<int> obs_idx;
+    std::vector<int> moment_obs;
+    std::vector<int> moment_miss;
+    Eigen::VectorXd gauss_resid;
+    Eigen::VectorXd moment_diff;
+    Eigen::VectorXd moment_dev;
+    Eigen::MatrixXd moment_cov;
     Eigen::VectorXd ey;
     Eigen::MatrixXd Eyy;
     Eigen::MatrixXd sharedS;
@@ -508,7 +572,8 @@ struct EmWorkspace {
 
 void emission_row(const Panel& d, const IndicatorLayout& L, const Spec& s, const Params& par,
                   const ParameterPrep& prep, int i, int t, std::vector<double>& logb, double* ybuf,
-                  bool* regularized, FactorCache& cache) {
+                  bool* regularized, FactorCache& cache, std::vector<int>& obs_idx,
+                  Eigen::VectorXd& gauss_resid) {
     cache.bind(prep.version);
     const int K = s.K;
     if (static_cast<int>(logb.size()) != K) logb.assign(static_cast<std::size_t>(K), 0.0);
@@ -541,7 +606,8 @@ void emission_row(const Panel& d, const IndicatorLayout& L, const Spec& s, const
         const double* mu = par.means.data() + span_index(span_index(mean_b, K, k), Jg, 0);
         const int kkey = shared ? -1 : k;
         logb[static_cast<std::size_t>(k)] +=
-            log_gauss_obs(ybuf, mu, prep.covariance(cov_b, k), Jg, cache, tkey, kkey, regularized);
+            log_gauss_obs(ybuf, mu, prep.covariance(cov_b, k), Jg, cache, tkey, kkey, regularized,
+                          obs_idx, gauss_resid);
     }
 }
 
@@ -624,9 +690,11 @@ struct NeumaierSum {
 // subtracted values are accumulated with NeumaierSum. The messages that the
 // backward pass stores are not these centered messages.
 double centered_forward_loglik(int T, int K, const double* emis, const std::vector<double>& log_delta,
-                               const std::vector<double>& log_tau, bool transition_equal) {
-    std::vector<double> cur(static_cast<std::size_t>(K)), nxt(static_cast<std::size_t>(K));
-    std::vector<double> loga(static_cast<std::size_t>(K));
+                               const std::vector<double>& log_tau, bool transition_equal,
+                               std::vector<double>& cur, std::vector<double>& nxt, std::vector<double>& loga) {
+    if (cur.size() != static_cast<std::size_t>(K)) cur.assign(static_cast<std::size_t>(K), 0.0);
+    if (nxt.size() != static_cast<std::size_t>(K)) nxt.assign(static_cast<std::size_t>(K), 0.0);
+    if (loga.size() != static_cast<std::size_t>(K)) loga.assign(static_cast<std::size_t>(K), 0.0);
     NeumaierSum acc;
     for (int t = 0; t < T; ++t) {
         const double* prev = t == 0 ? nullptr : cur.data();
@@ -647,18 +715,347 @@ double centered_forward_loglik(int T, int K, const double* emis, const std::vect
 // g_phase: one record per calling thread, not shared across workers.
 thread_local double g_last_second_forward_seconds = 0.0;
 
-FB forward_backward(const Panel& d, const Spec& s, const Params& par,
-                    const std::vector<int>& analyzed, EmWorkspace* scratch) {
+// Same NaN fill as vector::assign. A matching size keeps the allocation.
+// A short vector grows. The values the E-step then writes are unchanged.
+void reuse_nan(std::vector<double>& values, std::size_t n) {
+    if (values.size() != n) {
+        values.assign(n, kNaN);
+        return;
+    }
+    std::fill(values.begin(), values.end(), kNaN);
+}
+
+// Block sums are reduced in block-index order on this thread. That order does
+// not depend on how many threads computed the blocks. It is not the serial
+// subject-by-subject running total.
+void forward_backward_blocked(FB& fb, const Panel& d, const Spec& s, const Params& par,
+                              const std::vector<int>& analyzed) {
+    // Debug timing only. Cleared before any return so a blocked call cannot
+    // leave the previous E-step's seconds in place. Workers record their own
+    // durations and this thread publishes the sum; that value is not a fit result.
+    g_last_second_forward_seconds = 0.0;
+    fb.loglik = -kInf;
+    fb.regularized = false;
+    const IndicatorLayout L = indicator_layout(d);
+    const int N = d.N, T = d.T, K = s.K;
+    const int n = static_cast<int>(analyzed.size());
+    reuse_nan(fb.gamma, checked_product("posterior", N, T, K));
+    reuse_nan(fb.filtered, checked_product("posterior", N, T, K));
+    reuse_nan(fb.xi, checked_product("transition posterior", N, T - 1, K, K));
+    reuse_nan(fb.subject, static_cast<std::size_t>(N));
+    if (n <= 0) {
+        fb.loglik = 0.0;
+        return;
+    }
+    const ParameterPrep prep = prepare_parameters(d, L, s, par);
+    const int nblocks = (n + kEstepBlockSubjects - 1) / kEstepBlockSubjects;
+    const int nthreads = std::min(estep_threads_effective(s), nblocks);
+    struct BlockSum {
+        double loglik = 0.0;
+        double second_forward = 0.0;
+        bool regularized = false;
+        bool failed = false;
+        int fail_pos = -1;
+        std::exception_ptr error;
+    };
+    std::vector<BlockSum> blocks(static_cast<std::size_t>(nblocks));
+    auto run_block = [&](int b) {
+        const int begin = b * kEstepBlockSubjects;
+        const int end = std::min(n, begin + kEstepBlockSubjects);
+        EmWorkspace ws;
+        ws.log_delta = prep.log_delta;
+        ws.log_tau = prep.log_tau;
+        ws.ybuf.resize(static_cast<std::size_t>(L.n_gaussian));
+        ws.logb.resize(static_cast<size_t>(K));
+        ws.loga.resize(static_cast<size_t>(K));
+        ws.logbe.resize(static_cast<size_t>(K));
+        ws.alpha.resize(checked_product("flat", T, K));
+        ws.beta.resize(checked_product("flat", T, K));
+        ws.emis.resize(checked_product("flat", T, K));
+        ws.logxi.resize(checked_product("flat", K, K));
+        BlockSum local;
+        try {
+        for (int pos = begin; pos < end; ++pos) {
+            const int i = analyzed[static_cast<std::size_t>(pos)];
+            for (int t = 0; t < T; ++t) {
+                emission_row(d, L, s, par, prep, i, t, ws.logb, ws.ybuf.data(), &local.regularized, ws.cache,
+                             ws.obs_idx, ws.gauss_resid);
+                for (int k = 0; k < K; ++k) ws.emis[span_index(t, K, k)] = ws.logb[static_cast<size_t>(k)];
+            }
+            for (int t = 0; t < T; ++t) {
+                const double* prev = t == 0 ? nullptr : ws.alpha.data() + checked_product("flat", (t - 1), K);
+                int tb = s.transition_equal ? 0 : (t - 1);
+                forward_time(prev, ws.emis.data() + checked_product("flat", t, K), ws.log_delta, ws.log_tau, t, tb,
+                             K, ws.alpha.data() + checked_product("flat", t, K), ws.loga.data());
+            }
+            const auto second_started = std::chrono::steady_clock::now();
+            double ll = centered_forward_loglik(T, K, ws.emis.data(), ws.log_delta, ws.log_tau, s.transition_equal,
+                                                ws.center_cur, ws.center_nxt, ws.center_loga);
+            local.second_forward +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - second_started).count();
+            fb.subject[static_cast<std::size_t>(i)] = ll;
+            if (!std::isfinite(ll)) {
+                local.failed = true;
+                local.fail_pos = pos;
+                blocks[static_cast<std::size_t>(b)] = local;
+                return;
+            }
+            local.loglik += ll;
+            for (int k = 0; k < K; ++k) ws.beta[span_index((T - 1), K, k)] = 0.0;
+            for (int t = T - 2; t >= 0; --t) {
+                int tb = s.transition_equal ? 0 : t;
+                for (int j = 0; j < K; ++j) {
+                    for (int k = 0; k < K; ++k)
+                        ws.logbe[static_cast<size_t>(k)] =
+                            ws.log_tau[span_index(span_index(tb, K, j), K, k)] +
+                            ws.emis[span_index((t + 1), K, k)] +
+                            ws.beta[span_index((t + 1), K, k)];
+                    ws.beta[span_index(t, K, j)] = logsumexp(ws.logbe.data(), K);
+                }
+            }
+            for (int t = 0; t < T; ++t) {
+                for (int k = 0; k < K; ++k) ws.loga[static_cast<size_t>(k)] = ws.alpha[span_index(t, K, k)];
+                double norm = logsumexp(ws.loga.data(), K);
+                if (!std::isfinite(norm)) {
+                    fb.subject[static_cast<std::size_t>(i)] = -kInf;
+                    local.failed = true;
+                    local.fail_pos = pos;
+                    blocks[static_cast<std::size_t>(b)] = local;
+                    return;
+                }
+                for (int k = 0; k < K; ++k) {
+                    fb.filtered[flat_index(i, T, t, K, k)] = std::exp(ws.alpha[span_index(t, K, k)] - norm);
+                    ws.loga[static_cast<size_t>(k)] =
+                        ws.alpha[span_index(t, K, k)] + ws.beta[span_index(t, K, k)] - ll;
+                }
+                double* grow = fb.gamma.data() + flat_index(i, T, t, K, 0);
+                if (!normalize_log_weights(ws.loga.data(), K, grow)) {
+                    fb.subject[static_cast<std::size_t>(i)] = -kInf;
+                    local.failed = true;
+                    local.fail_pos = pos;
+                    blocks[static_cast<std::size_t>(b)] = local;
+                    return;
+                }
+            }
+            for (int t = 0; t < T - 1; ++t) {
+                int tb = s.transition_equal ? 0 : t;
+                for (int j = 0; j < K; ++j) {
+                    for (int k = 0; k < K; ++k) {
+                        ws.logxi[span_index(j, K, k)] =
+                            ws.alpha[span_index(t, K, j)] +
+                            ws.log_tau[span_index(span_index(tb, K, j), K, k)] +
+                            ws.emis[span_index((t + 1), K, k)] +
+                            ws.beta[span_index((t + 1), K, k)] - ll;
+                    }
+                }
+                double* xrow = fb.xi.data() + flat_index(i, T - 1, t, K, 0) * static_cast<std::size_t>(K);
+                if (!normalize_log_weights(ws.logxi.data(), K * K, xrow)) {
+                    fb.subject[static_cast<std::size_t>(i)] = -kInf;
+                    local.failed = true;
+                    local.fail_pos = pos;
+                    blocks[static_cast<std::size_t>(b)] = local;
+                    return;
+                }
+            }
+        }
+        blocks[static_cast<std::size_t>(b)] = local;
+        } catch (...) {
+            // Keep the second-forward time already measured in this block.
+            local.error = std::current_exception();
+            blocks[static_cast<std::size_t>(b)] = local;
+        }
+    };
+    // Constructed before launch so a failed std::thread constructor, after
+    // the workers that did start are joined, still publishes this call's
+    // second-forward time on the way out. The timer is not a fit result.
+    struct PublishSecondForward {
+        const std::vector<BlockSum>& blocks;
+        ~PublishSecondForward() {
+            double seconds = 0.0;
+            for (const BlockSum& block : blocks) seconds += block.second_forward;
+            g_last_second_forward_seconds = seconds;
+        }
+    } publish{blocks};
+    JoinedThreads workers;
+    try {
+        int cursor = 0;
+        int left_blocks = nblocks;
+        int left_threads = nthreads;
+        for (int t = 0; t < nthreads; ++t) {
+            const int take = left_blocks / left_threads;
+            const int b0 = cursor;
+            const int b1 = cursor + take;
+            cursor = b1;
+            left_blocks -= take;
+            left_threads -= 1;
+            workers.threads.emplace_back([&, b0, b1] {
+                try {
+                    for (int b = b0; b < b1; ++b) run_block(b);
+                } catch (...) {
+                    if (b0 < nblocks) blocks[static_cast<std::size_t>(b0)].error = std::current_exception();
+                }
+            });
+        }
+    } catch (...) {
+        workers.join();
+        throw;
+    }
+    workers.join();
+    for (const BlockSum& block : blocks) {
+        if (block.error) std::rethrow_exception(block.error);
+    }
+    // Stored partials are one log-likelihood and a flag per block. Streaming
+    // partials are not: those stay bounded by estep_threads. See
+    // categorical_streaming_blocked.
+    int fail_pos = n;
+    for (const BlockSum& block : blocks) {
+        if (block.failed) fail_pos = std::min(fail_pos, block.fail_pos);
+    }
+    if (fail_pos < n) {
+        for (int pos = fail_pos + 1; pos < n; ++pos) {
+            const int i = analyzed[static_cast<std::size_t>(pos)];
+            fb.subject[static_cast<std::size_t>(i)] = kNaN;
+            for (int t = 0; t < T; ++t) {
+                for (int k = 0; k < K; ++k) {
+                    fb.gamma[flat_index(i, T, t, K, k)] = kNaN;
+                    fb.filtered[flat_index(i, T, t, K, k)] = kNaN;
+                }
+            }
+            for (int step = 0; step < T - 1; ++step)
+                for (int j = 0; j < K; ++j)
+                    for (int k = 0; k < K; ++k)
+                        fb.xi[xi_index(i, T - 1, step, K, j, k)] = kNaN;
+        }
+        fb.loglik = -kInf;
+        return;
+    }
+    double total = 0.0;
+    bool regularized = false;
+    for (const BlockSum& block : blocks) {
+        total += block.loglik;
+        regularized = regularized || block.regularized;
+    }
+    fb.loglik = total;
+    fb.regularized = regularized;
+}
+
+struct PatternTable {
+    Panel panel;
+    std::vector<int> count;
+    std::vector<int> subject_pattern;
+};
+
+PatternTable build_patterns(const Panel& d, const std::vector<int>& analyzed) {
+    Spec gate;
+    gate.patterns = PATTERNS_COMPRESS;
+    require_patterns(gate, indicator_layout(d));
+    PatternTable table;
+    table.subject_pattern.assign(static_cast<std::size_t>(d.N), -1);
+    const int T = d.T, J = d.J;
+    std::map<std::vector<int>, int> seen;
+    std::vector<int> representative;
+    for (int i : analyzed) {
+        std::vector<int> key(static_cast<std::size_t>(T * J));
+        for (int t = 0; t < T; ++t)
+            for (int j = 0; j < J; ++j)
+                key[static_cast<std::size_t>(t * J + j)] = d.cat[cell(i, t, j, T, J)];
+        const auto found = seen.find(key);
+        int id;
+        if (found == seen.end()) {
+            id = static_cast<int>(table.count.size());
+            seen.emplace(std::move(key), id);
+            table.count.push_back(1);
+            representative.push_back(i);
+        } else {
+            id = found->second;
+            table.count[static_cast<std::size_t>(id)] += 1;
+        }
+        table.subject_pattern[static_cast<std::size_t>(i)] = id;
+    }
+    Panel panel;
+    panel.N = static_cast<int>(representative.size());
+    panel.T = d.T;
+    panel.J = d.J;
+    panel.measurement = d.measurement;
+    panel.family = d.family;
+    panel.column_role = d.column_role;
+    panel.ncat = d.ncat;
+    panel.Rmax = d.Rmax;
+    if (panel.N > 0 && T > 0 && J > 0)
+        panel.cat.assign(checked_product("pattern", panel.N, T, J), 0);
+    for (int u = 0; u < panel.N; ++u) {
+        const int src = representative[static_cast<std::size_t>(u)];
+        for (int t = 0; t < T; ++t)
+            for (int j = 0; j < J; ++j)
+                panel.cat[cell(u, t, j, T, J)] = d.cat[cell(src, t, j, T, J)];
+    }
+    table.panel = std::move(panel);
+    return table;
+}
+
+double counted_loglik(const std::vector<double>& subject, const std::vector<int>& analyzed,
+                      const std::vector<int>& counts) {
+    double total = 0.0;
+    for (int i : analyzed) {
+        const double ll = subject[static_cast<std::size_t>(i)];
+        // The historical E-step returns -Inf at the first non-finite subject
+        // and does not fold later untouched NaNs into the sum.
+        if (!std::isfinite(ll)) return -kInf;
+        total += static_cast<double>(counts[static_cast<std::size_t>(i)]) * ll;
+    }
+    return total;
+}
+
+void expand_pattern_fb(FB& dest, const FB& small, int N, int T, int K, const std::vector<int>& subject_pattern) {
+    dest.loglik = small.loglik;
+    dest.regularized = small.regularized;
+    dest.gamma.assign(checked_product("posterior", N, T, K), kNaN);
+    dest.filtered.assign(checked_product("posterior", N, T, K), kNaN);
+    dest.xi.assign(checked_product("transition posterior", N, T - 1, K, K), kNaN);
+    dest.subject.assign(static_cast<std::size_t>(N), kNaN);
+    if (small.gamma.empty() && small.subject.empty()) return;
+    for (int i = 0; i < N; ++i) {
+        const int u = subject_pattern[static_cast<std::size_t>(i)];
+        if (u < 0) continue;
+        if (static_cast<std::size_t>(u) < small.subject.size())
+            dest.subject[static_cast<std::size_t>(i)] = small.subject[static_cast<std::size_t>(u)];
+        if (small.gamma.empty()) continue;
+        for (int t = 0; t < T; ++t)
+            for (int k = 0; k < K; ++k) {
+                dest.gamma[flat_index(i, T, t, K, k)] = small.gamma[flat_index(u, T, t, K, k)];
+                dest.filtered[flat_index(i, T, t, K, k)] = small.filtered[flat_index(u, T, t, K, k)];
+            }
+        for (int t = 0; t < T - 1; ++t)
+            for (int j = 0; j < K; ++j)
+                for (int k = 0; k < K; ++k)
+                    dest.xi[xi_index(i, T - 1, t, K, j, k)] = small.xi[xi_index(u, T - 1, t, K, j, k)];
+    }
+}
+
+void forward_backward_expanded(FB& fb, const Panel& d, const Spec& s, const Params& par,
+                               const std::vector<int>& analyzed, EmWorkspace* scratch);
+
+void forward_backward_into(FB& fb, const Panel& d, const Spec& s, const Params& par,
+                           const std::vector<int>& analyzed, EmWorkspace* scratch) {
+    if (s.patterns == PATTERNS_COMPRESS) {
+        forward_backward_expanded(fb, d, s, par, analyzed, scratch);
+        return;
+    }
+    if (estep_threads_effective(s) > 1 && static_cast<int>(analyzed.size()) > kEstepBlockSubjects) {
+        forward_backward_blocked(fb, d, s, par, analyzed);
+        return;
+    }
     EmWorkspace local;
     EmWorkspace& ws = scratch ? *scratch : local;
     g_last_second_forward_seconds = 0.0;
-    FB fb;
+    fb.loglik = -kInf;
+    fb.regularized = false;
     const IndicatorLayout L = indicator_layout(d);
     const int N = d.N, T = d.T, K = s.K;
-    fb.gamma.assign(checked_product("posterior", N, T, K), kNaN);
-    fb.filtered.assign(checked_product("posterior", N, T, K), kNaN);
-    fb.xi.assign(checked_product("transition posterior", N, T - 1, K, K), kNaN);
-    fb.subject.assign(N, kNaN);
+    reuse_nan(fb.gamma, checked_product("posterior", N, T, K));
+    reuse_nan(fb.filtered, checked_product("posterior", N, T, K));
+    reuse_nan(fb.xi, checked_product("transition posterior", N, T - 1, K, K));
+    reuse_nan(fb.subject, static_cast<std::size_t>(N));
     double total = 0.0;
     const ParameterPrep prep = prepare_parameters(d, L, s, par);
     ws.log_delta = prep.log_delta;
@@ -675,7 +1072,8 @@ FB forward_backward(const Panel& d, const Spec& s, const Params& par,
         // One T by K emission per subject. Forward, backward, and the joint
         // transition posterior all read this matrix.
         for (int t = 0; t < T; ++t) {
-            emission_row(d, L, s, par, prep, i, t, ws.logb, ws.ybuf.data(), &fb.regularized, ws.cache);
+            emission_row(d, L, s, par, prep, i, t, ws.logb, ws.ybuf.data(), &fb.regularized, ws.cache,
+                         ws.obs_idx, ws.gauss_resid);
             for (int k = 0; k < K; ++k) ws.emis[span_index(t, K, k)] = ws.logb[static_cast<size_t>(k)];
         }
         for (int t = 0; t < T; ++t) {
@@ -685,13 +1083,14 @@ FB forward_backward(const Panel& d, const Spec& s, const Params& par,
                          K, ws.alpha.data() + checked_product("flat", t, K), ws.loga.data());
         }
         const auto second_started = std::chrono::steady_clock::now();
-        double ll = centered_forward_loglik(T, K, ws.emis.data(), ws.log_delta, ws.log_tau, s.transition_equal);
+        double ll = centered_forward_loglik(T, K, ws.emis.data(), ws.log_delta, ws.log_tau, s.transition_equal,
+                                            ws.center_cur, ws.center_nxt, ws.center_loga);
         g_last_second_forward_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - second_started).count();
         fb.subject[i] = ll;
         if (!std::isfinite(ll)) {
             fb.loglik = -kInf;
-            return fb;
+            return;
         }
         total += ll;
         for (int k = 0; k < K; ++k) ws.beta[span_index((T - 1), K, k)] = 0.0;
@@ -712,7 +1111,7 @@ FB forward_backward(const Panel& d, const Spec& s, const Params& par,
             if (!std::isfinite(norm)) {
                 fb.loglik = -kInf;
                 fb.subject[i] = -kInf;
-                return fb;
+                return;
             }
             for (int k = 0; k < K; ++k) {
                 fb.filtered[flat_index(i, T, t, K, k)] = std::exp(ws.alpha[span_index(t, K, k)] - norm);
@@ -725,7 +1124,7 @@ FB forward_backward(const Panel& d, const Spec& s, const Params& par,
             if (!normalize_log_weights(ws.loga.data(), K, grow)) {
                 fb.loglik = -kInf;
                 fb.subject[i] = -kInf;
-                return fb;
+                return;
             }
         }
         for (int t = 0; t < T - 1; ++t) {
@@ -745,11 +1144,30 @@ FB forward_backward(const Panel& d, const Spec& s, const Params& par,
             if (!normalize_log_weights(ws.logxi.data(), K * K, xrow)) {
                 fb.loglik = -kInf;
                 fb.subject[i] = -kInf;
-                return fb;
+                return;
             }}
     }
     fb.loglik = total;
+}
+
+FB forward_backward(const Panel& d, const Spec& s, const Params& par,
+                    const std::vector<int>& analyzed, EmWorkspace* scratch) {
+    FB fb;
+    forward_backward_into(fb, d, s, par, analyzed, scratch);
     return fb;
+}
+
+void forward_backward_expanded(FB& fb, const Panel& d, const Spec& s, const Params& par,
+                               const std::vector<int>& analyzed, EmWorkspace* scratch) {
+    const PatternTable table = build_patterns(d, analyzed);
+    Spec inner = s;
+    inner.patterns = PATTERNS_NONE;
+    std::vector<int> idx(static_cast<std::size_t>(table.panel.N));
+    std::iota(idx.begin(), idx.end(), 0);
+    FB small;
+    forward_backward_into(small, table.panel, inner, par, idx, scratch);
+    small.loglik = counted_loglik(small.subject, idx, table.count);
+    expand_pattern_fb(fb, small, d.N, d.T, s.K, table.subject_pattern);
 }
 
 
@@ -762,8 +1180,12 @@ struct LikelihoodOnly {
     bool regularized = false;
 };
 
+LikelihoodOnly forward_likelihood_expanded(const Panel& d, const Spec& s, const Params& par,
+                                        const std::vector<int>& analyzed);
+
 LikelihoodOnly forward_likelihood(const Panel& d, const Spec& s, const Params& par,
                                   const std::vector<int>& analyzed) {
+    if (s.patterns == PATTERNS_COMPRESS) return forward_likelihood_expanded(d, s, par, analyzed);
     LikelihoodOnly out;
     const IndicatorLayout L = indicator_layout(d);
     const int N = d.N, T = d.T, K = s.K;
@@ -774,6 +1196,8 @@ LikelihoodOnly forward_likelihood(const Panel& d, const Spec& s, const Params& p
     log_delta = prep.log_delta;
     log_tau = prep.log_tau;
     std::vector<double> ybuf(static_cast<std::size_t>(L.n_gaussian));
+    std::vector<int> obs_idx;
+    Eigen::VectorXd gauss_resid;
     FactorCache cache;
     bool regularized = false;
     bool impossible = false;
@@ -784,7 +1208,8 @@ LikelihoodOnly forward_likelihood(const Panel& d, const Spec& s, const Params& p
         NeumaierSum acc;
         bool bad = false;
         for (int t = 0; t < T; ++t) {
-            emission_row(d, L, s, par, prep, i, t, logb, ybuf.data(), &regularized, cache);
+            emission_row(d, L, s, par, prep, i, t, logb, ybuf.data(), &regularized, cache, obs_idx,
+                         gauss_resid);
             const double* prev = t == 0 ? nullptr : cur.data();
             const int tb = s.transition_equal ? 0 : (t - 1);
             forward_time(prev, logb.data(), log_delta, log_tau, t, tb, K, nxt.data(), loga.data());
@@ -810,6 +1235,26 @@ LikelihoodOnly forward_likelihood(const Panel& d, const Spec& s, const Params& p
     return out;
 }
 
+LikelihoodOnly forward_likelihood_expanded(const Panel& d, const Spec& s, const Params& par,
+                                            const std::vector<int>& analyzed) {
+    const PatternTable table = build_patterns(d, analyzed);
+    Spec inner = s;
+    inner.patterns = PATTERNS_NONE;
+    std::vector<int> idx(static_cast<std::size_t>(table.panel.N));
+    std::iota(idx.begin(), idx.end(), 0);
+    LikelihoodOnly small = forward_likelihood(table.panel, inner, par, idx);
+    LikelihoodOnly out;
+    out.regularized = small.regularized;
+    out.loglik = counted_loglik(small.subject, idx, table.count);
+    out.subject.assign(static_cast<std::size_t>(d.N), kNaN);
+    for (int i = 0; i < d.N; ++i) {
+        const int u = table.subject_pattern[static_cast<std::size_t>(i)];
+        if (u < 0) continue;
+        out.subject[static_cast<std::size_t>(i)] = small.subject[static_cast<std::size_t>(u)];
+    }
+    return out;
+}
+
 bool same_bits(double a, double b) {
     static_assert(sizeof(double) == sizeof(std::uint64_t), "double is 64-bit");
     std::uint64_t xa = 0, xb = 0;
@@ -826,10 +1271,12 @@ std::vector<int> viterbi_path(const Panel& d, const Spec& s, const Params& par, 
     std::vector<int> psi(checked_product("flat", T, K), 0);
     const ParameterPrep prep = prepare_parameters(d, L, s, par);
     std::vector<double> ybuf(static_cast<std::size_t>(L.n_gaussian));
+    std::vector<int> obs_idx;
+    Eigen::VectorXd gauss_resid;
     FactorCache cache;
     bool reg = false;
     for (int t = 0; t < T; ++t) {
-        emission_row(d, L, s, par, prep, i, t, logb, ybuf.data(), &reg, cache);
+        emission_row(d, L, s, par, prep, i, t, logb, ybuf.data(), &reg, cache, obs_idx, gauss_resid);
         if (t == 0) {
             for (int k = 0; k < K; ++k) {
                 double ld = par.delta[k] > 0 ? std::log(par.delta[k]) : -kInf;
@@ -1016,7 +1463,7 @@ Params mstep(const Panel& d, const Spec& s, const Params& current, const FB& fb,
                 }
                 int kkey = shared ? -1 : k;
                 conditional_moments(ws.ybuf.data(), mu, *Sp, Jg, ws.ey, ws.Eyy, ws.cache, tkey, kkey,
-                                    regularized);
+                                    regularized, ws.moment_obs, ws.moment_miss, ws.moment_diff, ws.moment_cov);
                 nwt[span_index(t, K, k)] += w;
                 sumy[span_index(t, K, k)] += w * ws.ey;
             }
@@ -1077,10 +1524,12 @@ Params mstep(const Panel& d, const Spec& s, const Params& current, const FB& fb,
                 }
                 int kkey = shared_cov ? -1 : k;
                 conditional_moments(ws.ybuf.data(), mu_cur, *Sp, Jg, ws.ey, ws.Eyy, ws.cache, tkey, kkey,
-                                    regularized);
+                                    regularized, ws.moment_obs, ws.moment_miss, ws.moment_diff,
+                                    ws.moment_cov);
                 const Eigen::VectorXd& m = mu[span_index(mean_b, K, k)];
-                Eigen::VectorXd dev = ws.ey - m;
-                scat[span_index(cb, K, k)] += w * (ws.Eyy + dev * dev.transpose());
+                if (ws.moment_dev.size() != Jg) ws.moment_dev.resize(Jg);
+                for (int j = 0; j < Jg; ++j) ws.moment_dev(j) = ws.ey(j) - m(j);
+                scat[span_index(cb, K, k)] += w * (ws.Eyy + ws.moment_dev * ws.moment_dev.transpose());
                 nsc[span_index(cb, K, k)] += w;
             }
         }
@@ -1993,24 +2442,36 @@ struct OneRun {
     std::vector<double> class_weight;
     std::vector<double> trace;
     FB fb;
+    int n_patterns = 0;
+    std::vector<int> pattern_id;
 };
 
+void accumulate_class_weight(OneRun& run, int K) {
+    if (!(K > 0 && !run.fb.gamma.empty())) return;
+    run.class_weight.assign(static_cast<size_t>(K), 0.0);
+    const std::size_t n = run.fb.gamma.size() / static_cast<std::size_t>(K);
+    for (std::size_t i = 0; i < n; ++i)
+        for (int k = 0; k < K; ++k)
+            run.class_weight[static_cast<size_t>(k)] += run.fb.gamma[span_index(i, K, k)];
+}
+
+void release_dense_storage(FB& fb) {
+    fb.gamma.clear();
+    fb.gamma.shrink_to_fit();
+    fb.filtered.clear();
+    fb.filtered.shrink_to_fit();
+    fb.xi.clear();
+    fb.xi.shrink_to_fit();
+}
+
 void release_dense_posterior(OneRun& run, int K) {
-    if (K > 0 && !run.fb.gamma.empty()) {
-        run.class_weight.assign(static_cast<size_t>(K), 0.0);
-        const std::size_t n = run.fb.gamma.size() / static_cast<std::size_t>(K);
-        for (std::size_t i = 0; i < n; ++i)
-            for (int k = 0; k < K; ++k)
-                run.class_weight[static_cast<size_t>(k)] += run.fb.gamma[span_index(i, K, k)];
-    }
+    accumulate_class_weight(run, K);
     const bool had_gamma = !run.fb.gamma.empty();
-    run.fb.gamma.clear();
-    run.fb.gamma.shrink_to_fit();
-    run.fb.filtered.clear();
-    run.fb.filtered.shrink_to_fit();
-    run.fb.xi.clear();
-    run.fb.xi.shrink_to_fit();
-    run.dense_dropped = had_gamma;
+    release_dense_storage(run.fb);
+    // An empty gamma must not clear a flag already set by run_em. That flag
+    // means the accepted posterior was released before a later E-step and the
+    // best start still has to be recomputed. A present gamma still sets it.
+    if (had_gamma) run.dense_dropped = true;
 }
 
 void release_screen_posterior(OneRun& run) {
@@ -2020,37 +2481,637 @@ void release_screen_posterior(OneRun& run) {
     run.fb.filtered.shrink_to_fit();
     run.fb.xi.clear();
     run.fb.xi.shrink_to_fit();
+    run.class_weight.clear();
+    run.class_weight.shrink_to_fit();
     run.dense_dropped = false;
 }
 
-// dense_tail false evaluates the last update with the forward likelihood only.
-// Screening discards that posterior, and the likelihood matches the full
-// forward-backward value bit for bit, including the ridge flag.
-OneRun run_em(const Panel& d, const Spec& s, const Params& init, const std::vector<int>& analyzed,
-              int max_iter, std::vector<DebugEmStep>* notes = nullptr, bool dense_tail = true) {
+// One posterior buffer. The retained arrays move into `slot` and the next
+// E-step overwrites them. Their class totals are kept first, because a
+// rejected step still needs that sum and does not keep the overwritten values.
+void reclaim_posterior_for_estep(OneRun& run, FB& slot, int K) {
+    if (!run.fb.gamma.empty()) {
+        accumulate_class_weight(run, K);
+        run.dense_dropped = true;
+    }
+    slot.gamma.swap(run.fb.gamma);
+    slot.filtered.swap(run.fb.filtered);
+    slot.xi.swap(run.fb.xi);
+    slot.subject.swap(run.fb.subject);
+    slot.loglik = -kInf;
+    slot.regularized = false;
+}
+
+// Categorical sufficient statistics for one streaming E-step. Each cell is
+// updated once per analyzed subject, in analyzed order, which is the same
+// sequence of additions that the stored M-step makes to that cell.
+struct CatStream {
+    double loglik = -kInf;
+    bool regularized = false;
+    std::vector<double> init;
+    std::vector<double> tau_num;
+    std::vector<double> tau_den;
+    std::vector<double> rho_num;
+    std::vector<double> rho_den;
+    std::vector<double> class_weight;
+};
+
+CatStream categorical_streaming_blocked(const Panel& d, const Spec& s, const Params& par,
+                                      const std::vector<int>& analyzed);
+
+CatStream categorical_streaming_counted(const Panel& d, const Spec& s, const Params& par,
+                                       const std::vector<int>& analyzed, const std::vector<int>& counts,
+                                       EmWorkspace* scratch);
+
+CatStream categorical_streaming_estep(const Panel& d, const Spec& s, const Params& par,
+                                      const std::vector<int>& analyzed, EmWorkspace* scratch,
+                                      const std::vector<int>* counts = nullptr) {
+    if (counts) return categorical_streaming_counted(d, s, par, analyzed, *counts, scratch);
+    if (indicator_layout(d).measurement != MEAS_CATEGORICAL) {
+        throw std::invalid_argument(
+            "estep=\"streaming\" is implemented for categorical models only. "
+            "Gaussian and mixed models stay on estep=\"stored\". "
+            "Streaming sufficient statistics for those families are later work.");
+    }
+    if (estep_threads_effective(s) > 1 && static_cast<int>(analyzed.size()) > kEstepBlockSubjects) {
+        return categorical_streaming_blocked(d, s, par, analyzed);
+    }
+    EmWorkspace local;
+    EmWorkspace& ws = scratch ? *scratch : local;
+    CatStream stats;
+    const IndicatorLayout L = indicator_layout(d);
+    const int N = d.N, T = d.T, K = s.K, J = d.J;
+    const int ntb = n_tau_blocks(d, s);
+    const int nmb = n_meas_blocks(d, s);
+    stats.init.assign(static_cast<size_t>(K), 0.0);
+    stats.class_weight.assign(static_cast<size_t>(K), 0.0);
+    if (ntb) {
+        stats.tau_num.assign(checked_product("flat", ntb, K, K), 0.0);
+        stats.tau_den.assign(checked_product("flat", ntb, K), 0.0);
+    }
+    if (L.n_categorical) {
+        stats.rho_num.assign(checked_product("flat", nmb, J, K, d.Rmax), 0.0);
+        stats.rho_den.assign(checked_product("flat", nmb, J, K), 0.0);
+    }
+    const ParameterPrep prep = prepare_parameters(d, L, s, par);
+    ws.log_delta = prep.log_delta;
+    ws.log_tau = prep.log_tau;
+    ws.ybuf.resize(static_cast<std::size_t>(L.n_gaussian));
+    ws.logb.resize(static_cast<size_t>(K));
+    ws.loga.resize(static_cast<size_t>(K));
+    ws.logbe.resize(static_cast<size_t>(K));
+    ws.alpha.resize(checked_product("flat", T, K));
+    ws.beta.resize(checked_product("flat", T, K));
+    ws.emis.resize(checked_product("flat", T, K));
+    ws.logxi.resize(checked_product("flat", K, K));
+    std::vector<double> gamma(checked_product("flat", T, K));
+    std::vector<double> xi(checked_product("flat", T > 0 ? T - 1 : 0, K, K));
+    double total = 0.0;
+    for (int i : analyzed) {
+        for (int t = 0; t < T; ++t) {
+            emission_row(d, L, s, par, prep, i, t, ws.logb, ws.ybuf.data(), &stats.regularized, ws.cache,
+                         ws.obs_idx, ws.gauss_resid);
+            for (int k = 0; k < K; ++k) ws.emis[span_index(t, K, k)] = ws.logb[static_cast<size_t>(k)];
+        }
+        for (int t = 0; t < T; ++t) {
+            const double* prev = t == 0 ? nullptr : ws.alpha.data() + checked_product("flat", (t - 1), K);
+            int tb = s.transition_equal ? 0 : (t - 1);
+            forward_time(prev, ws.emis.data() + checked_product("flat", t, K), ws.log_delta, ws.log_tau, t, tb,
+                         K, ws.alpha.data() + checked_product("flat", t, K), ws.loga.data());
+        }
+        double ll = centered_forward_loglik(T, K, ws.emis.data(), ws.log_delta, ws.log_tau, s.transition_equal,
+                                            ws.center_cur, ws.center_nxt, ws.center_loga);
+        if (!std::isfinite(ll)) {
+            stats.loglik = -kInf;
+            return stats;
+        }
+        total += ll;
+        for (int k = 0; k < K; ++k) ws.beta[span_index((T - 1), K, k)] = 0.0;
+        for (int t = T - 2; t >= 0; --t) {
+            int tb = s.transition_equal ? 0 : t;
+            for (int j = 0; j < K; ++j) {
+                for (int k = 0; k < K; ++k)
+                    ws.logbe[static_cast<size_t>(k)] =
+                        ws.log_tau[span_index(span_index(tb, K, j), K, k)] +
+                        ws.emis[span_index((t + 1), K, k)] +
+                        ws.beta[span_index((t + 1), K, k)];
+                ws.beta[span_index(t, K, j)] = logsumexp(ws.logbe.data(), K);
+            }
+        }
+        for (int t = 0; t < T; ++t) {
+            for (int k = 0; k < K; ++k) ws.loga[static_cast<size_t>(k)] = ws.alpha[span_index(t, K, k)];
+            double norm = logsumexp(ws.loga.data(), K);
+            if (!std::isfinite(norm)) {
+                stats.loglik = -kInf;
+                return stats;
+            }
+            for (int k = 0; k < K; ++k)
+                ws.loga[static_cast<size_t>(k)] =
+                    ws.alpha[span_index(t, K, k)] + ws.beta[span_index(t, K, k)] - ll;
+            if (!normalize_log_weights(ws.loga.data(), K, gamma.data() + static_cast<size_t>(t) * static_cast<size_t>(K))) {
+                stats.loglik = -kInf;
+                return stats;
+            }
+        }
+        for (int t = 0; t < T - 1; ++t) {
+            int tb = s.transition_equal ? 0 : t;
+            for (int j = 0; j < K; ++j) {
+                for (int k = 0; k < K; ++k) {
+                    ws.logxi[span_index(j, K, k)] =
+                        ws.alpha[span_index(t, K, j)] +
+                        ws.log_tau[span_index(span_index(tb, K, j), K, k)] +
+                        ws.emis[span_index((t + 1), K, k)] +
+                        ws.beta[span_index((t + 1), K, k)] - ll;
+                }
+            }
+            if (!normalize_log_weights(ws.logxi.data(), K * K,
+                                       xi.data() + static_cast<size_t>(t) * static_cast<size_t>(K) * static_cast<size_t>(K))) {
+                stats.loglik = -kInf;
+                return stats;
+            }
+        }
+        for (int k = 0; k < K; ++k) stats.init[static_cast<size_t>(k)] += gamma[static_cast<size_t>(k)];
+        if (ntb) {
+            for (int t = 0; t < T - 1; ++t) {
+                int b = s.transition_equal ? 0 : t;
+                for (int j = 0; j < K; ++j) {
+                    for (int k = 0; k < K; ++k) {
+                        double x = xi[static_cast<size_t>((t * K + j) * K + k)];
+                        stats.tau_num[span_index(span_index(b, K, j), K, k)] += x;
+                        stats.tau_den[span_index(b, K, j)] += x;
+                    }
+                }
+            }
+        }
+        if (L.n_categorical) {
+            for (int t = 0; t < T; ++t) {
+                int b = s.measurement_invariant ? 0 : t;
+                for (int j : L.categorical_index) {
+                    int y = d.cat[cell(i, t, j, T, J)];
+                    if (y < 0) continue;
+                    for (int k = 0; k < K; ++k) {
+                        double g = gamma[static_cast<size_t>(t * K + k)];
+                        stats.rho_num[span_index(span_index(span_index(b, J, j), K, k), d.Rmax, y)] += g;
+                        stats.rho_den[span_index(span_index(b, J, j), K, k)] += g;
+                    }
+                }
+            }
+        }
+        for (int t = 0; t < T; ++t)
+            for (int k = 0; k < K; ++k)
+                stats.class_weight[static_cast<size_t>(k)] += gamma[static_cast<size_t>(t * K + k)];
+    }
+    if (static_cast<int>(analyzed.size()) != N)
+        stats.class_weight.assign(static_cast<size_t>(K), kNaN);
+    stats.loglik = total;
+    return stats;
+}
+
+void add_stream(CatStream& dst, const CatStream& src) {
+    auto add = [](std::vector<double>& into, const std::vector<double>& from) {
+        for (std::size_t i = 0; i < into.size(); ++i) into[i] += from[i];
+    };
+    add(dst.init, src.init);
+    add(dst.tau_num, src.tau_num);
+    add(dst.tau_den, src.tau_den);
+    add(dst.rho_num, src.rho_num);
+    add(dst.rho_den, src.rho_den);
+    add(dst.class_weight, src.class_weight);
+    dst.loglik += src.loglik;
+    dst.regularized = dst.regularized || src.regularized;
+}
+
+void scale_stream(CatStream& stats, int count) {
+    const double w = static_cast<double>(count);
+    auto mul = [w](std::vector<double>& v) {
+        for (double& x : v) x *= w;
+    };
+    mul(stats.init);
+    mul(stats.tau_num);
+    mul(stats.tau_den);
+    mul(stats.rho_num);
+    mul(stats.rho_den);
+    mul(stats.class_weight);
+    stats.loglik *= w;
+}
+
+Panel pattern_row(const Panel& src, int u) {
+    Panel row;
+    row.N = 1;
+    row.T = src.T;
+    row.J = src.J;
+    row.measurement = src.measurement;
+    row.family = src.family;
+    row.column_role = src.column_role;
+    row.ncat = src.ncat;
+    row.Rmax = src.Rmax;
+    if (src.T > 0 && src.J > 0) row.cat.assign(checked_product("pattern-row", src.T, src.J), 0);
+    for (int t = 0; t < src.T; ++t)
+        for (int j = 0; j < src.J; ++j)
+            row.cat[cell(0, t, j, src.T, src.J)] = src.cat[cell(u, t, j, src.T, src.J)];
+    return row;
+}
+
+CatStream categorical_streaming_counted(const Panel& d, const Spec& s, const Params& par,
+                                        const std::vector<int>& analyzed, const std::vector<int>& counts,
+                                        EmWorkspace* scratch) {
+    const int n = static_cast<int>(analyzed.size());
+    auto one_pattern = [&](int i) {
+        const Panel row = pattern_row(d, i);
+        const std::vector<int> only{0};
+        CatStream part = categorical_streaming_estep(row, s, par, only, nullptr, nullptr);
+        scale_stream(part, counts[static_cast<std::size_t>(i)]);
+        return part;
+    };
+    auto accumulate = [&](int begin, int end) {
+        CatStream acc;
+        bool started = false;
+        for (int pos = begin; pos < end; ++pos) {
+            CatStream part = one_pattern(analyzed[static_cast<std::size_t>(pos)]);
+            if (!started) {
+                acc = std::move(part);
+                started = true;
+            } else {
+                add_stream(acc, part);
+            }
+        }
+        if (!started) acc.loglik = 0.0;
+        return acc;
+    };
+    if (n <= 0) {
+        CatStream empty;
+        empty.loglik = 0.0;
+        return empty;
+    }
+    const int nblocks = std::max(1, (n + kEstepBlockSubjects - 1) / kEstepBlockSubjects);
+    const int nthreads = std::min(estep_threads_effective(s), nblocks);
+    if (nthreads <= 1) return accumulate(0, n);
+    (void)scratch;
+    // One partial per worker in the wave, plus the running total. Slots are
+    // reused after that wave is added in block order.
+    struct Slot {
+        CatStream stats;
+        std::exception_ptr error;
+    };
+    std::vector<Slot> slots(static_cast<std::size_t>(nthreads));
+    CatStream total;
+    bool have_total = false;
+    for (int wave = 0; wave < nblocks; wave += nthreads) {
+        const int count = std::min(nthreads, nblocks - wave);
+        {
+            JoinedThreads workers;
+            try {
+                for (int t = 0; t < count; ++t) {
+                    const int b = wave + t;
+                    workers.threads.emplace_back([&, t, b] {
+                        try {
+                            const int begin = b * kEstepBlockSubjects;
+                            const int end = std::min(n, begin + kEstepBlockSubjects);
+                            slots[static_cast<std::size_t>(t)].error = nullptr;
+                            slots[static_cast<std::size_t>(t)].stats = accumulate(begin, end);
+                        } catch (...) {
+                            slots[static_cast<std::size_t>(t)].error = std::current_exception();
+                        }
+                    });
+                }
+            } catch (...) {
+                workers.join();
+                throw;
+            }
+            workers.join();
+        }
+        for (int t = 0; t < count; ++t)
+            if (slots[static_cast<std::size_t>(t)].error)
+                std::rethrow_exception(slots[static_cast<std::size_t>(t)].error);
+        for (int t = 0; t < count; ++t) {
+            if (!have_total) {
+                total = std::move(slots[static_cast<std::size_t>(t)].stats);
+                have_total = true;
+            } else {
+                add_stream(total, slots[static_cast<std::size_t>(t)].stats);
+            }
+        }
+    }
+    return total;
+}
+
+CatStream categorical_streaming_blocked(const Panel& d, const Spec& s, const Params& par,
+                                        const std::vector<int>& analyzed) {
+    const IndicatorLayout L = indicator_layout(d);
+    const int N = d.N, T = d.T, K = s.K, J = d.J;
+    const int n = static_cast<int>(analyzed.size());
+    const int ntb = n_tau_blocks(d, s);
+    const int nmb = n_meas_blocks(d, s);
+    const ParameterPrep prep = prepare_parameters(d, L, s, par);
+    const int nblocks = (n + kEstepBlockSubjects - 1) / kEstepBlockSubjects;
+    const int nthreads = std::min(estep_threads_effective(s), nblocks);
+    auto blank = [&]() {
+        CatStream stats;
+        stats.init.assign(static_cast<std::size_t>(K), 0.0);
+        stats.class_weight.assign(static_cast<std::size_t>(K), 0.0);
+        if (ntb) {
+            stats.tau_num.assign(checked_product("flat", ntb, K, K), 0.0);
+            stats.tau_den.assign(checked_product("flat", ntb, K), 0.0);
+        }
+        if (L.n_categorical) {
+            stats.rho_num.assign(checked_product("flat", nmb, J, K, d.Rmax), 0.0);
+            stats.rho_den.assign(checked_product("flat", nmb, J, K), 0.0);
+        }
+        stats.loglik = 0.0;
+        return stats;
+    };
+    struct Slot {
+        CatStream stats;
+        bool failed = false;
+        std::exception_ptr error;
+    };
+    // At most one CatStream partial per worker, plus the running total.
+    // Slots are reused after that wave's blocks have been added in index order.
+    std::vector<Slot> slots(static_cast<std::size_t>(nthreads));
+    for (Slot& slot : slots) slot.stats = blank();
+    auto zero_stats = [](CatStream& stats) {
+        std::fill(stats.init.begin(), stats.init.end(), 0.0);
+        std::fill(stats.tau_num.begin(), stats.tau_num.end(), 0.0);
+        std::fill(stats.tau_den.begin(), stats.tau_den.end(), 0.0);
+        std::fill(stats.rho_num.begin(), stats.rho_num.end(), 0.0);
+        std::fill(stats.rho_den.begin(), stats.rho_den.end(), 0.0);
+        std::fill(stats.class_weight.begin(), stats.class_weight.end(), 0.0);
+        stats.loglik = 0.0;
+        stats.regularized = false;
+    };
+    auto run_block = [&](int b, Slot& slot) {
+        zero_stats(slot.stats);
+        slot.failed = false;
+        slot.error = nullptr;
+        const int begin = b * kEstepBlockSubjects;
+        const int end = std::min(n, begin + kEstepBlockSubjects);
+        EmWorkspace ws;
+        ws.log_delta = prep.log_delta;
+        ws.log_tau = prep.log_tau;
+        ws.ybuf.resize(static_cast<std::size_t>(L.n_gaussian));
+        ws.logb.resize(static_cast<size_t>(K));
+        ws.loga.resize(static_cast<size_t>(K));
+        ws.logbe.resize(static_cast<size_t>(K));
+        ws.alpha.resize(checked_product("flat", T, K));
+        ws.beta.resize(checked_product("flat", T, K));
+        ws.emis.resize(checked_product("flat", T, K));
+        ws.logxi.resize(checked_product("flat", K, K));
+        std::vector<double> gamma(checked_product("flat", T, K));
+        std::vector<double> xi(checked_product("flat", T > 0 ? T - 1 : 0, K, K));
+        CatStream& stats = slot.stats;
+        for (int pos = begin; pos < end; ++pos) {
+            const int i = analyzed[static_cast<std::size_t>(pos)];
+            for (int t = 0; t < T; ++t) {
+                emission_row(d, L, s, par, prep, i, t, ws.logb, ws.ybuf.data(), &stats.regularized, ws.cache,
+                             ws.obs_idx, ws.gauss_resid);
+                for (int k = 0; k < K; ++k) ws.emis[span_index(t, K, k)] = ws.logb[static_cast<size_t>(k)];
+            }
+            for (int t = 0; t < T; ++t) {
+                const double* prev = t == 0 ? nullptr : ws.alpha.data() + checked_product("flat", (t - 1), K);
+                int tb = s.transition_equal ? 0 : (t - 1);
+                forward_time(prev, ws.emis.data() + checked_product("flat", t, K), ws.log_delta, ws.log_tau, t, tb,
+                             K, ws.alpha.data() + checked_product("flat", t, K), ws.loga.data());
+            }
+            double ll = centered_forward_loglik(T, K, ws.emis.data(), ws.log_delta, ws.log_tau, s.transition_equal,
+                                                ws.center_cur, ws.center_nxt, ws.center_loga);
+            if (!std::isfinite(ll)) {
+                stats.loglik = -kInf;
+                slot.failed = true;
+                return;
+            }
+            stats.loglik += ll;
+            for (int k = 0; k < K; ++k) ws.beta[span_index((T - 1), K, k)] = 0.0;
+            for (int t = T - 2; t >= 0; --t) {
+                int tb = s.transition_equal ? 0 : t;
+                for (int j = 0; j < K; ++j) {
+                    for (int k = 0; k < K; ++k)
+                        ws.logbe[static_cast<size_t>(k)] =
+                            ws.log_tau[span_index(span_index(tb, K, j), K, k)] +
+                            ws.emis[span_index((t + 1), K, k)] +
+                            ws.beta[span_index((t + 1), K, k)];
+                    ws.beta[span_index(t, K, j)] = logsumexp(ws.logbe.data(), K);
+                }
+            }
+            for (int t = 0; t < T; ++t) {
+                for (int k = 0; k < K; ++k) ws.loga[static_cast<size_t>(k)] = ws.alpha[span_index(t, K, k)];
+                double norm = logsumexp(ws.loga.data(), K);
+                if (!std::isfinite(norm)) {
+                    stats.loglik = -kInf;
+                    slot.failed = true;
+                    return;
+                }
+                for (int k = 0; k < K; ++k)
+                    ws.loga[static_cast<size_t>(k)] =
+                        ws.alpha[span_index(t, K, k)] + ws.beta[span_index(t, K, k)] - ll;
+                if (!normalize_log_weights(ws.loga.data(), K,
+                                           gamma.data() + static_cast<std::size_t>(t) * static_cast<std::size_t>(K))) {
+                    stats.loglik = -kInf;
+                    slot.failed = true;
+                    return;
+                }
+            }
+            for (int t = 0; t < T - 1; ++t) {
+                int tb = s.transition_equal ? 0 : t;
+                for (int j = 0; j < K; ++j) {
+                    for (int k = 0; k < K; ++k) {
+                        ws.logxi[span_index(j, K, k)] =
+                            ws.alpha[span_index(t, K, j)] +
+                            ws.log_tau[span_index(span_index(tb, K, j), K, k)] +
+                            ws.emis[span_index((t + 1), K, k)] +
+                            ws.beta[span_index((t + 1), K, k)] - ll;
+                    }
+                }
+                if (!normalize_log_weights(ws.logxi.data(), K * K,
+                                           xi.data() + static_cast<std::size_t>(t) * static_cast<std::size_t>(K) *
+                                                            static_cast<std::size_t>(K))) {
+                    stats.loglik = -kInf;
+                    slot.failed = true;
+                    return;
+                }
+            }
+            for (int k = 0; k < K; ++k) stats.init[static_cast<size_t>(k)] += gamma[static_cast<size_t>(k)];
+            if (ntb) {
+                for (int t = 0; t < T - 1; ++t) {
+                    int tb = s.transition_equal ? 0 : t;
+                    for (int j = 0; j < K; ++j) {
+                        for (int k = 0; k < K; ++k) {
+                            double x = xi[static_cast<size_t>((t * K + j) * K + k)];
+                            stats.tau_num[span_index(span_index(tb, K, j), K, k)] += x;
+                            stats.tau_den[span_index(tb, K, j)] += x;
+                        }
+                    }
+                }
+            }
+            if (L.n_categorical) {
+                for (int t = 0; t < T; ++t) {
+                    int mb = s.measurement_invariant ? 0 : t;
+                    for (int j : L.categorical_index) {
+                        int y = d.cat[cell(i, t, j, T, J)];
+                        if (y < 0) continue;
+                        for (int k = 0; k < K; ++k) {
+                            double g = gamma[static_cast<size_t>(t * K + k)];
+                            stats.rho_num[span_index(span_index(span_index(mb, J, j), K, k), d.Rmax, y)] += g;
+                            stats.rho_den[span_index(span_index(mb, J, j), K, k)] += g;
+                        }
+                    }
+                }
+            }
+            for (int t = 0; t < T; ++t)
+                for (int k = 0; k < K; ++k)
+                    stats.class_weight[static_cast<size_t>(k)] += gamma[static_cast<size_t>(t * K + k)];
+        }
+    };
+    // Waves of at most nthreads blocks. Each completed block is added into the
+    // running total in block-index order before its slot is reused, so every
+    // thread count greater than 1 uses ((b0 + b1) + b2) + ... .
+    CatStream total = blank();
+    for (int wave = 0; wave < nblocks; wave += nthreads) {
+        const int count = std::min(nthreads, nblocks - wave);
+        {
+            JoinedThreads workers;
+            try {
+                for (int t = 0; t < count; ++t) {
+                    const int b = wave + t;
+                    workers.threads.emplace_back([&, t, b] {
+                        try {
+                            run_block(b, slots[static_cast<std::size_t>(t)]);
+                        } catch (...) {
+                            slots[static_cast<std::size_t>(t)].error = std::current_exception();
+                        }
+                    });
+                }
+            } catch (...) {
+                workers.join();
+                throw;
+            }
+            workers.join();
+        }
+        for (int t = 0; t < count; ++t) {
+            const Slot& slot = slots[static_cast<std::size_t>(t)];
+            if (slot.error) std::rethrow_exception(slot.error);
+        }
+        for (int t = 0; t < count; ++t) {
+            if (slots[static_cast<std::size_t>(t)].failed) {
+                // Reuse the running total. A new CatStream here would be a
+                // second full statistic vector on top of the slots.
+                zero_stats(total);
+                total.loglik = -kInf;
+                return total;
+            }
+        }
+        for (int t = 0; t < count; ++t) add_stream(total, slots[static_cast<std::size_t>(t)].stats);
+    }
+    if (n != N) total.class_weight.assign(static_cast<std::size_t>(K), kNaN);
+    return total;
+}
+
+Params mstep_categorical(const Panel& d, const Spec& s, const Params& current, const CatStream& stats) {
+    const int K = s.K, J = d.J;
+    Params out = current;
+    out.delta.resize(K);
+    double isum = std::accumulate(stats.init.begin(), stats.init.end(), 0.0);
+    if (isum <= 0) {
+        for (int k = 0; k < K; ++k) out.delta[static_cast<size_t>(k)] = 1.0 / K;
+    } else {
+        for (int k = 0; k < K; ++k) out.delta[static_cast<size_t>(k)] = stats.init[static_cast<size_t>(k)] / isum;
+    }
+    int ntb = n_tau_blocks(d, s);
+    if (ntb) {
+        out.tau.assign(checked_product("flat", ntb, K, K), 0.0);
+        for (int b = 0; b < ntb; ++b) {
+            for (int j = 0; j < K; ++j) {
+                if (stats.tau_den[span_index(b, K, j)] <= 0) {
+                    for (int k = 0; k < K; ++k) out.tau[span_index(span_index(b, K, j), K, k)] = 1.0 / K;
+                } else {
+                    for (int k = 0; k < K; ++k)
+                        out.tau[span_index(span_index(b, K, j), K, k)] =
+                            stats.tau_num[span_index(span_index(b, K, j), K, k)] / stats.tau_den[span_index(b, K, j)];
+                }
+            }
+        }
+    } else {
+        out.tau.clear();
+    }
+    const IndicatorLayout L = indicator_layout(d);
+    if (L.n_categorical) {
+        int nmb = n_meas_blocks(d, s);
+        out.rho.assign(checked_product("flat", nmb, J, K, d.Rmax), 0.0);
+        for (int b = 0; b < nmb; ++b) {
+            for (int j : L.categorical_index) {
+                int R = d.ncat[j];
+                for (int k = 0; k < K; ++k) {
+                    double dd = stats.rho_den[span_index(span_index(b, J, j), K, k)];
+                    if (dd <= 0) {
+                        for (int r = 0; r < R; ++r)
+                            out.rho[span_index(span_index(span_index(b, J, j), K, k), d.Rmax, r)] = 1.0 / R;
+                    } else {
+                        for (int r = 0; r < R; ++r)
+                            out.rho[span_index(span_index(span_index(b, J, j), K, k), d.Rmax, r)] =
+                                stats.rho_num[span_index(span_index(span_index(b, J, j), K, k), d.Rmax, r)] / dd;
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+Params mstep_counted(const Panel& d, const Spec& s, const Params& current, const FB& fb,
+                     const std::vector<int>& analyzed, const std::vector<int>& counts, bool* regularized,
+                     double* min_eigen, EmWorkspace* scratch) {
+    FB scaled = fb;
+    const int T = d.T, K = s.K;
+    for (int i : analyzed) {
+        const double w = static_cast<double>(counts[static_cast<std::size_t>(i)]);
+        for (int t = 0; t < T; ++t)
+            for (int k = 0; k < K; ++k) {
+                scaled.gamma[flat_index(i, T, t, K, k)] *= w;
+                scaled.filtered[flat_index(i, T, t, K, k)] *= w;
+            }
+        for (int t = 0; t < T - 1; ++t)
+            for (int j = 0; j < K; ++j)
+                for (int k = 0; k < K; ++k)
+                    scaled.xi[xi_index(i, T - 1, t, K, j, k)] *= w;
+    }
+    return mstep(d, s, current, scaled, analyzed, regularized, min_eigen, scratch);
+}
+
+// Same accept, reject, and tolerance decisions as run_em. The E-step does not
+// retain gamma, filtered, or xi. dense_dropped is set only after an accepted
+// step, and only when a posterior was requested, so fit() recomputes it once.
+OneRun run_em_streaming(const Panel& d, const Spec& s, const Params& init, const std::vector<int>& analyzed,
+                        int max_iter, std::vector<DebugEmStep>* notes, bool dense_tail,
+                        const std::vector<int>* counts) {
     OneRun run;
     run.params = init;
     run.min_eigen = kInf;
     double prev_ll = -kInf;
     Params prev = init;
     EmWorkspace ws;
-    // These describe the retained parameters. A ridge that exists only on an
-    // update the next E-step rejects is not copied onto that fit.
     bool accepted_reg = false;
     double accepted_min = kInf;
     bool pending_reg = false;
     double pending_min = kInf;
+    const CatStream* accepted = nullptr;
+    CatStream kept;
+    auto publish = [&]() {
+        if (accepted) run.class_weight = accepted->class_weight;
+        run.fb.gamma.clear();
+        run.fb.filtered.clear();
+        run.fb.xi.clear();
+        run.dense_dropped = accepted && s.posteriors;
+    };
     for (int it = 1; it <= max_iter; ++it) {
-        FB fb = forward_backward(d, s, run.params, analyzed, &ws);
+        CatStream step = categorical_streaming_estep(d, s, run.params, analyzed, &ws, counts);
         run.iters = it;
-        run.trace.push_back(fb.loglik);
+        run.trace.push_back(step.loglik);
         DebugEmStep note;
         note.iteration = it;
-        note.evaluated = fb.loglik;
-        note.regularized_emission = fb.regularized;
-        const bool nonfinite = !std::isfinite(fb.loglik);
+        note.evaluated = step.loglik;
+        note.regularized_emission = step.regularized;
+        const bool nonfinite = !std::isfinite(step.loglik);
         const bool decreased =
-            it > 1 && std::isfinite(fb.loglik) && fb.loglik < prev_ll - em_decrease_allowance(prev_ll);
+            it > 1 && std::isfinite(step.loglik) && step.loglik < prev_ll - em_decrease_allowance(prev_ll);
         if (nonfinite || decreased) {
             run.numerical_fail = nonfinite;
             run.converged = false;
@@ -2063,30 +3124,31 @@ OneRun run_em(const Panel& d, const Spec& s, const Params& init, const std::vect
             note.decreased = decreased;
             note.kept = prev_ll;
             if (notes) notes->push_back(note);
-            break;
+            publish();
+            return run;
         }
-        accepted_reg = accepted_reg || pending_reg || fb.regularized;
+        accepted_reg = accepted_reg || pending_reg || step.regularized;
         if (std::isfinite(pending_min)) accepted_min = std::min(accepted_min, pending_min);
         pending_reg = false;
         pending_min = kInf;
         run.regularized = accepted_reg;
         run.min_eigen = accepted_min;
-        if (it > 1 && (fb.loglik - prev_ll) / (std::abs(prev_ll) + 1e-8) < s.tol) {
-            const double kept_ll = fb.loglik;
-            run.loglik = kept_ll;
-            run.fb = std::move(fb);
+        kept = std::move(step);
+        accepted = &kept;
+        if (it > 1 && (kept.loglik - prev_ll) / (std::abs(prev_ll) + 1e-8) < s.tol) {
+            run.loglik = kept.loglik;
             run.converged = true;
-            note.kept = kept_ll;
+            note.kept = kept.loglik;
             if (notes) notes->push_back(note);
-            break;
+            publish();
+            return run;
         }
         prev = run.params;
-        prev_ll = fb.loglik;
-        run.loglik = fb.loglik;
-        run.fb = std::move(fb);
+        prev_ll = kept.loglik;
+        run.loglik = kept.loglik;
         bool regm = false;
         double me = kInf;
-        run.params = mstep(d, s, run.params, run.fb, analyzed, &regm, &me, &ws);
+        run.params = mstep_categorical(d, s, run.params, kept);
         ws.invalidate_factors();
         pending_reg = regm;
         pending_min = me;
@@ -2094,21 +3156,16 @@ OneRun run_em(const Panel& d, const Spec& s, const Params& init, const std::vect
         note.kept = prev_ll;
         if (notes) notes->push_back(note);
         if (it == max_iter) {
-            // Evaluating the updated parameters is not another iteration.
-            // A drop rejects that update and is not a converged fit.
-            // Screening throws the posterior away, so that evaluation is the
-            // forward likelihood only. The full posterior is kept when this
-            // call is the whole fit.
             double eval_ll = -kInf;
             bool eval_reg = false;
-            FB dense;
+            CatStream final_step;
             if (dense_tail) {
-                dense = forward_backward(d, s, run.params, analyzed, &ws);
-                eval_ll = dense.loglik;
-                eval_reg = dense.regularized;
+                final_step = categorical_streaming_estep(d, s, run.params, analyzed, &ws, counts);
+                eval_ll = final_step.loglik;
+                eval_reg = final_step.regularized;
             } else {
                 LikelihoodOnly fwd = forward_likelihood(d, s, run.params, analyzed);
-                eval_ll = fwd.loglik;
+                eval_ll = counts ? counted_loglik(fwd.subject, analyzed, *counts) : fwd.loglik;
                 eval_reg = fwd.regularized;
             }
             const bool bad2 = !std::isfinite(eval_ll) || eval_ll < prev_ll - em_decrease_allowance(prev_ll);
@@ -2136,7 +3193,162 @@ OneRun run_em(const Panel& d, const Spec& s, const Params& init, const std::vect
                 if (std::isfinite(pending_min)) accepted_min = std::min(accepted_min, pending_min);
                 run.regularized = accepted_reg;
                 run.min_eigen = accepted_min;
-                if (dense_tail) run.fb = std::move(dense);
+                if (dense_tail) {
+                    kept = std::move(final_step);
+                    accepted = &kept;
+                }
+                run.loglik = eval_ll;
+                if (!run.trace.empty()) run.trace.back() = run.loglik;
+                run.converged = std::isfinite(run.loglik) &&
+                                (run.loglik - prev_ll) / (std::abs(prev_ll) + 1e-8) < s.tol;
+                run.iters = it;
+            }
+        }
+    }
+    publish();
+    return run;
+}
+
+// dense_tail false evaluates the last update with the forward likelihood only.
+// Screening discards that posterior, and the likelihood matches the full
+// forward-backward value bit for bit, including the ridge flag.
+OneRun run_em(const Panel& d, const Spec& s, const Params& init, const std::vector<int>& analyzed,
+              int max_iter, std::vector<DebugEmStep>* notes = nullptr, bool dense_tail = true,
+              const std::vector<int>* counts = nullptr) {
+    if (s.patterns == PATTERNS_COMPRESS) {
+        const PatternTable table = build_patterns(d, analyzed);
+        Spec inner = s;
+        inner.patterns = PATTERNS_NONE;
+        std::vector<int> idx(static_cast<std::size_t>(table.panel.N));
+        std::iota(idx.begin(), idx.end(), 0);
+        OneRun run = run_em(table.panel, inner, init, idx, max_iter, notes, dense_tail, &table.count);
+        if (!run.fb.gamma.empty()) {
+            FB expanded;
+            expand_pattern_fb(expanded, run.fb, d.N, d.T, s.K, table.subject_pattern);
+            run.fb = std::move(expanded);
+        }
+        run.n_patterns = table.panel.N;
+        run.pattern_id = table.subject_pattern;
+        return run;
+    }
+    if (s.estep == ESTEP_STREAMING)
+        return run_em_streaming(d, s, init, analyzed, max_iter, notes, dense_tail, counts);
+    OneRun run;
+    run.params = init;
+    run.min_eigen = kInf;
+    double prev_ll = -kInf;
+    Params prev = init;
+    EmWorkspace ws;
+    // These describe the retained parameters. A ridge that exists only on an
+    // update the next E-step rejects is not copied onto that fit.
+    bool accepted_reg = false;
+    double accepted_min = kInf;
+    bool pending_reg = false;
+    double pending_min = kInf;
+    FB slot;
+    for (int it = 1; it <= max_iter; ++it) {
+        reclaim_posterior_for_estep(run, slot, s.K);
+        forward_backward_into(slot, d, s, run.params, analyzed, &ws);
+        if (counts) slot.loglik = counted_loglik(slot.subject, analyzed, *counts);
+        run.iters = it;
+        run.trace.push_back(slot.loglik);
+        DebugEmStep note;
+        note.iteration = it;
+        note.evaluated = slot.loglik;
+        note.regularized_emission = slot.regularized;
+        const bool nonfinite = !std::isfinite(slot.loglik);
+        const bool decreased =
+            it > 1 && std::isfinite(slot.loglik) && slot.loglik < prev_ll - em_decrease_allowance(prev_ll);
+        if (nonfinite || decreased) {
+            release_dense_storage(slot);
+            run.numerical_fail = nonfinite;
+            run.converged = false;
+            run.params = prev;
+            run.loglik = prev_ll;
+            if (!run.trace.empty()) run.trace.back() = prev_ll;
+            run.regularized = accepted_reg;
+            run.min_eigen = accepted_min;
+            note.nonfinite = nonfinite;
+            note.decreased = decreased;
+            note.kept = prev_ll;
+            if (notes) notes->push_back(note);
+            break;
+        }
+        accepted_reg = accepted_reg || pending_reg || slot.regularized;
+        if (std::isfinite(pending_min)) accepted_min = std::min(accepted_min, pending_min);
+        pending_reg = false;
+        pending_min = kInf;
+        run.regularized = accepted_reg;
+        run.min_eigen = accepted_min;
+        if (it > 1 && (slot.loglik - prev_ll) / (std::abs(prev_ll) + 1e-8) < s.tol) {
+            const double kept_ll = slot.loglik;
+            run.loglik = kept_ll;
+            run.fb = std::move(slot);
+            run.converged = true;
+            note.kept = kept_ll;
+            if (notes) notes->push_back(note);
+            break;
+        }
+        prev = run.params;
+        prev_ll = slot.loglik;
+        run.loglik = slot.loglik;
+        run.fb = std::move(slot);
+        bool regm = false;
+        double me = kInf;
+        run.params = counts ? mstep_counted(d, s, run.params, run.fb, analyzed, *counts, &regm, &me, &ws)
+                            : mstep(d, s, run.params, run.fb, analyzed, &regm, &me, &ws);
+        ws.invalidate_factors();
+        pending_reg = regm;
+        pending_min = me;
+        note.regularized_mstep = regm;
+        note.kept = prev_ll;
+        if (notes) notes->push_back(note);
+        if (it == max_iter) {
+            // Evaluating the updated parameters is not another iteration.
+            // A drop rejects that update and is not a converged fit.
+            // Screening throws the posterior away, so that evaluation is the
+            // forward likelihood only. The full posterior is kept when this
+            // call is the whole fit.
+            double eval_ll = -kInf;
+            bool eval_reg = false;
+            if (dense_tail) {
+                reclaim_posterior_for_estep(run, slot, s.K);
+                forward_backward_into(slot, d, s, run.params, analyzed, &ws);
+                if (counts) slot.loglik = counted_loglik(slot.subject, analyzed, *counts);
+                eval_ll = slot.loglik;
+                eval_reg = slot.regularized;
+            } else {
+                LikelihoodOnly fwd = forward_likelihood(d, s, run.params, analyzed);
+                eval_ll = counts ? counted_loglik(fwd.subject, analyzed, *counts) : fwd.loglik;
+                eval_reg = fwd.regularized;
+            }
+            const bool bad2 = !std::isfinite(eval_ll) || eval_ll < prev_ll - em_decrease_allowance(prev_ll);
+            if (bad2) {
+                if (dense_tail) release_dense_storage(slot);
+                run.numerical_fail = !std::isfinite(eval_ll);
+                run.converged = false;
+                run.params = prev;
+                run.loglik = prev_ll;
+                run.regularized = accepted_reg;
+                run.min_eigen = accepted_min;
+                if (!run.trace.empty()) run.trace.back() = prev_ll;
+                if (notes) {
+                    DebugEmStep final_note;
+                    final_note.iteration = it;
+                    final_note.evaluated = eval_ll;
+                    final_note.kept = prev_ll;
+                    final_note.decreased = std::isfinite(eval_ll);
+                    final_note.nonfinite = !std::isfinite(eval_ll);
+                    final_note.regularized_emission = eval_reg;
+                    final_note.regularized_mstep = regm;
+                    notes->push_back(final_note);
+                }
+            } else {
+                accepted_reg = accepted_reg || pending_reg || eval_reg;
+                if (std::isfinite(pending_min)) accepted_min = std::min(accepted_min, pending_min);
+                run.regularized = accepted_reg;
+                run.min_eigen = accepted_min;
+                if (dense_tail) run.fb = std::move(slot);
                 run.loglik = eval_ll;
                 if (!run.trace.empty()) run.trace.back() = run.loglik;
                 run.converged = std::isfinite(run.loglik) &&
@@ -2353,7 +3565,9 @@ void fill_eligibility(FitResult& r) {
     r.eligible_further_starts = true;
     r.eligible_assignment = !failed;
     r.eligible_transitions = !failed;
-    const bool meas_ok = r.cov_positive_definite && !r.cov_collapsed_component && r.n_numerically_empty == 0;
+    const bool posterior_counts_known = r.estep != ESTEP_STREAMING || r.posteriors_computed;
+    const bool meas_ok = r.cov_positive_definite && !r.cov_collapsed_component &&
+                         posterior_counts_known && r.n_numerically_empty == 0;
     r.eligible_measurement = !failed && meas_ok;
     r.eligible_model_comparison = !failed && r.ic_supported && r.n_starts >= 2 && r.n_best >= 2;
     std::vector<std::string> detail;
@@ -2365,6 +3579,8 @@ void fill_eligibility(FitResult& r) {
         if (r.regularized) add("model_comparison", "variance_floor");
         if (!r.cov_positive_definite) add("model_comparison", "not_positive_definite");
         if (r.cov_collapsed_component) add("model_comparison", "collapsed_component");
+        if (r.estep == ESTEP_STREAMING && !r.posteriors_computed)
+            add("model_comparison", "posteriors_not_computed");
         if (r.n_numerically_empty > 0) add("model_comparison", "numerically_empty_state");
         if (r.n_starts < 2) add("model_comparison", "replication_not_assessed");
     }
@@ -2383,6 +3599,8 @@ void fill_eligibility(FitResult& r) {
         if (r.n_starts >= 2 && r.n_best < 2) add("measurement", "best_loglik_not_replicated");
         if (!r.cov_positive_definite) add("measurement", "not_positive_definite");
         if (r.cov_collapsed_component) add("measurement", "collapsed_component");
+        if (r.estep == ESTEP_STREAMING && !r.posteriors_computed)
+            add("measurement", "posteriors_not_computed");
         if (r.n_numerically_empty > 0) add("measurement", "numerically_empty_state");
     }
     r.eligibility_detail = join_reasons(detail);
@@ -2411,12 +3629,26 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
     r.modal.assign(checked_product("subject-wave", d.N, T), -1);
     r.viterbi.assign(checked_product("subject-wave", d.N, T), -1);
     r.viterbi_logprob.assign(d.N, kNaN);
+    const bool have_posterior = !r.gamma.empty();
+    // Only a streaming fit that skipped the posterior pass is "not computed".
+    // A stored fit with an empty gamma keeps the historical diagnostics.
+    const bool omitted = s.estep == ESTEP_STREAMING && !have_posterior;
+    r.estep = s.estep;
+    r.posteriors_computed = !omitted;
+    if (omitted) {
+        r.entropy_wave = kNaN;
+        r.entropy_sequence = kNaN;
+        r.entropy_wave_raw = kNaN;
+        r.entropy_sequence_raw = kNaN;
+        r.min_occupancy = kNaN;
+    }
     for (int i : analyzed) {
         double log_joint = -kInf;
         auto path = viterbi_path(d, s, r.params, i, &log_joint);
         r.viterbi_logprob[i] = log_joint;
         for (int t = 0; t < T; ++t) {
             r.viterbi[wave_index(i, T, t)] = path[t];
+            if (!have_posterior) continue;
             int md = 0;
             double best = -1;
             for (int k = 0; k < K; ++k) {
@@ -2430,6 +3662,7 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
             r.modal[wave_index(i, T, t)] = md;
             r.prevalence_hard[span_index(t, K, md)] += 1.0;
         }
+        if (!have_posterior) continue;
         for (int t = 0; t < T - 1; ++t) {
             int a = r.modal[wave_index(i, T, t)];
             int c = r.modal[wave_index(i, T, t + 1)];
@@ -2440,15 +3673,24 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
                         r.xi[xi_index(i, T - 1, t, K, j, k)];
         }
     }
-    if (Na > 0) {
+    if (have_posterior && Na > 0) {
         for (int t = 0; t < T; ++t)
             for (int k = 0; k < K; ++k) {
                 r.prevalence_posterior[span_index(t, K, k)] = r.expected_membership[span_index(t, K, k)] / Na;
                 r.prevalence_hard[span_index(t, K, k)] /= Na;
             }
     }
+    if (omitted) {
+        r.modal.clear();
+        r.prevalence_posterior.clear();
+        r.prevalence_hard.clear();
+        r.expected_membership.clear();
+        r.expected_transitions.clear();
+        r.hard_transitions.clear();
+    }
     // entropy
     double Hw = 0, Hs = 0;
+    if (have_posterior) {
     for (int i : analyzed) {
         for (int t = 0; t < T; ++t)
             for (int k = 0; k < K; ++k) {
@@ -2469,6 +3711,8 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
                 }
             }
     }
+    }
+    if (!omitted) {
     r.entropy_wave_raw = Hw;
     r.entropy_sequence_raw = Hs;
     double denom = (Na > 0 && K > 1) ? Na * T * std::log(static_cast<double>(K)) : 0.0;
@@ -2499,6 +3743,7 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
                 if (row < kNumericalEmpty) r.n_negligible_transition_rows += 1;
             }
         }
+    }
     }
     annotate_covariance(d, s, r, gauss_var);
     r.n_boundary = count_boundary(d, s, r.params, gauss_var);
@@ -2578,6 +3823,7 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
     std::vector<std::string> warning;
     if (!std::isfinite(r.loglik)) blocking.push_back("numerical_failure");
     if (!r.converged) blocking.push_back("not_converged");
+    // n_best is the count from logliks_replicate. This gate does not apply a second tolerance.
     if (r.n_starts >= 2 && r.n_best < 2) blocking.push_back("best_loglik_not_replicated");
     if (!r.cov_positive_definite) blocking.push_back("not_positive_definite");
     if (r.regularized) warning.push_back("variance_floor");
@@ -2585,6 +3831,7 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
     if (r.n_starts < 2) warning.push_back("replication_not_assessed");
     if (r.cov_ill_conditioned) warning.push_back("ill_conditioned_covariance");
     if (r.cov_collapsed_component) warning.push_back("collapsed_component");
+    if (s.estep == ESTEP_STREAMING && !r.posteriors_computed) warning.push_back("posteriors_not_computed");
     if (r.n_numerically_empty > 0) warning.push_back("numerically_empty_state");
     std::vector<std::string> all = blocking;
     all.insert(all.end(), warning.begin(), warning.end());
@@ -2592,8 +3839,9 @@ void prevalences_from(const Panel& d, const Spec& s, FitResult& r, const std::ve
     else if (!warning.empty()) r.status = STATUS_WARNED;
     else r.status = STATUS_OK;
     r.status_reason = all.empty() ? "ok" : join_reasons(all);
+    const bool posterior_counts_known = s.estep != ESTEP_STREAMING || r.posteriors_computed;
     r.ic_supported = blocking.empty() && !r.regularized && r.cov_positive_definite &&
-                     !r.cov_collapsed_component && r.n_numerically_empty == 0 &&
+                     !r.cov_collapsed_component && posterior_counts_known && r.n_numerically_empty == 0 &&
                      std::isfinite(r.loglik);
     r.admissible = std::isfinite(r.loglik) && r.converged && !r.regularized &&
                    r.cov_positive_definite && !r.cov_collapsed_component;
@@ -2857,12 +4105,12 @@ void permute_posteriors(FitResult& r, int N, int T, int K, const std::vector<int
             if (nto[i] == old) return i;
         return old;
     };
-    if (r.modal.size() == checked_product("subject-wave", N, T) &&
-        r.viterbi.size() == r.modal.size()) {
-        for (std::size_t i = 0; i < r.modal.size(); ++i) {
-            r.modal[i] = remap(r.modal[i]);
-            r.viterbi[i] = remap(r.viterbi[i]);
-        }
+    const std::size_t n_state = checked_product("subject-wave", N, T);
+    if (r.viterbi.size() == n_state) {
+        for (std::size_t i = 0; i < r.viterbi.size(); ++i) r.viterbi[i] = remap(r.viterbi[i]);
+    }
+    if (r.modal.size() == n_state) {
+        for (std::size_t i = 0; i < r.modal.size(); ++i) r.modal[i] = remap(r.modal[i]);
     }
     (void)N;
     (void)T;
@@ -2953,8 +4201,45 @@ const char* debug_library_source_sha() { return LTA_SOURCE_SHA; }
 
 ScaledForwardBackward scaled_forward_backward(const Panel& data, const Spec& spec, const Params& params) {
     require_panel(data);
-    ScaledForwardBackward out;
     const IndicatorLayout L = indicator_layout(data);
+    require_patterns(spec, L);
+    if (spec.patterns == PATTERNS_COMPRESS) {
+        // Same scaled recurrence as the loop below, once per unique pattern,
+        // then copied onto every subject that shares that pattern.
+        const PreparedPanel prepared = prepare_data(data);
+        const PatternTable table = build_patterns(data, prepared.analyzed);
+        Spec inner = spec;
+        inner.patterns = PATTERNS_NONE;
+        ScaledForwardBackward small = scaled_forward_backward(table.panel, inner, params);
+        std::vector<int> idx(static_cast<std::size_t>(table.panel.N));
+        std::iota(idx.begin(), idx.end(), 0);
+        const int N = data.N, T = data.T, K = spec.K;
+        ScaledForwardBackward out;
+        out.loglik = counted_loglik(small.subject, idx, table.count);
+        out.gamma.assign(checked_product("posterior", N, T, K), kNaN);
+        out.filtered.assign(checked_product("posterior", N, T, K), kNaN);
+        out.xi.assign(checked_product("transition posterior", N, T - 1, K, K), kNaN);
+        out.subject.assign(static_cast<std::size_t>(N), kNaN);
+        for (int i = 0; i < N; ++i) {
+            const int u = table.subject_pattern[static_cast<std::size_t>(i)];
+            if (u < 0) continue;
+            if (static_cast<std::size_t>(u) < small.subject.size())
+                out.subject[static_cast<std::size_t>(i)] = small.subject[static_cast<std::size_t>(u)];
+            if (small.gamma.empty()) continue;
+            for (int t = 0; t < T; ++t)
+                for (int k = 0; k < K; ++k) {
+                    out.gamma[flat_index(i, T, t, K, k)] = small.gamma[flat_index(u, T, t, K, k)];
+                    out.filtered[flat_index(i, T, t, K, k)] = small.filtered[flat_index(u, T, t, K, k)];
+                }
+            for (int t = 0; t < T - 1; ++t)
+                for (int j = 0; j < K; ++j)
+                    for (int k = 0; k < K; ++k)
+                        out.xi[xi_index(i, T - 1, t, K, j, k)] =
+                            small.xi[xi_index(u, T - 1, t, K, j, k)];
+        }
+        return out;
+    }
+    ScaledForwardBackward out;
     const int N = data.N, T = data.T, K = spec.K;
     out.gamma.assign(checked_product("posterior", N, T, K), kNaN);
     out.filtered.assign(checked_product("posterior", N, T, K), kNaN);
@@ -2964,6 +4249,8 @@ ScaledForwardBackward scaled_forward_backward(const Panel& data, const Spec& spe
     const std::vector<int>& analyzed = prepared_scaled.analyzed;
     const ParameterPrep prep = prepare_parameters(data, L, spec, params);
     std::vector<double> ybuf(static_cast<std::size_t>(L.n_gaussian));
+    std::vector<int> obs_idx;
+    Eigen::VectorXd gauss_resid;
     FactorCache cache;
     bool regularized = false;
     std::vector<double> logb(static_cast<size_t>(K));
@@ -2977,7 +4264,8 @@ ScaledForwardBackward scaled_forward_backward(const Panel& data, const Spec& spe
     for (int i : analyzed) {
         bool impossible = false;
         for (int t = 0; t < T; ++t) {
-            emission_row(data, L, spec, params, prep, i, t, logb, ybuf.data(), &regularized, cache);
+            emission_row(data, L, spec, params, prep, i, t, logb, ybuf.data(), &regularized, cache, obs_idx,
+                         gauss_resid);
             double m = -kInf;
             for (int k = 0; k < K; ++k)
                 if (std::isfinite(logb[static_cast<size_t>(k)])) m = std::max(m, logb[static_cast<size_t>(k)]);
@@ -3315,12 +4603,15 @@ void validate_params(const Panel& data, const Spec& spec, const IndicatorLayout&
 
 double observed_loglik(const Panel& data, const Spec& spec, const Params& params) {
     const PreparedPanel prepared = prepare_data(data);
+    require_patterns(spec, prepared.layout);
     validate_params(data, spec, prepared.layout, params);
     return forward_likelihood(data, spec, params, prepared.analyzed).loglik;
 }
 
 FixedForwardBackward fixed_forward_backward(const Panel& data, const Spec& spec, const Params& params) {
+    require_estep_threads(spec);
     const PreparedPanel prepared = prepare_data(data);
+    require_patterns(spec, prepared.layout);
     validate_params(data, spec, prepared.layout, params);
     FB fb = forward_backward(data, spec, params, prepared.analyzed, nullptr);
     FixedForwardBackward out;
@@ -3331,6 +4622,7 @@ FixedForwardBackward fixed_forward_backward(const Panel& data, const Spec& spec,
 
 std::vector<double> subject_loglik(const Panel& data, const Spec& spec, const Params& params) {
     const PreparedPanel prepared = prepare_data(data);
+    require_patterns(spec, prepared.layout);
     validate_params(data, spec, prepared.layout, params);
     return forward_likelihood(data, spec, params, prepared.analyzed).subject;
 }
@@ -3418,7 +4710,9 @@ CovarianceDiagnostic diagnose_covariance(const std::vector<double>& sigma, int p
 }
 
 FitResult evaluate(const Panel& data, const Spec& spec, const Params& params) {
+    require_estep_threads(spec);
     require_panel(data);
+    require_patterns(spec, indicator_layout(data));
     if (spec.K < 1) throw std::invalid_argument("n_states must be >= 1");
     const IndicatorLayout layout = indicator_layout(data);
     std::vector<int> analyzed, excluded;
@@ -3463,6 +4757,12 @@ FitResult evaluate(const Panel& data, const Spec& spec, const Params& params) {
     r.gamma = fb.gamma;
     r.filtered = fb.filtered;
     r.xi = fb.xi;
+    if (spec.patterns == PATTERNS_COMPRESS) {
+        const PatternTable table = build_patterns(data, analyzed);
+        r.patterns = PATTERNS_COMPRESS;
+        r.n_patterns = table.panel.N;
+        r.pattern_id = table.subject_pattern;
+    }
     r.label_order = order;
     r.measurement = layout.measurement;
     r.family = layout.family;
@@ -3722,6 +5022,7 @@ class WorkerPool {
                 if (i >= n) break;
                 const auto t0 = std::chrono::steady_clock::now();
                 try {
+                    PoolWorkerGuard guard;
                     job(i);
                 } catch (...) {
                     errors_[static_cast<size_t>(i)] = std::current_exception();
@@ -3782,6 +5083,8 @@ class WorkerPool {
 }  // namespace
 
 bool debug_likelihood_matches_full(const Panel& data, const Spec& spec, const Params& params) {
+    require_estep_threads(spec);
+    require_patterns(spec, indicator_layout(data));
     const IndicatorLayout layout = indicator_layout(data);
     std::vector<int> analyzed;
     for (int i = 0; i < data.N; ++i)
@@ -3797,6 +5100,8 @@ bool debug_likelihood_matches_full(const Panel& data, const Spec& spec, const Pa
 }
 
 DebugEmRun debug_em_from_params(const Panel& data, const Spec& spec, const Params& init, int max_iter) {
+    require_estep_threads(spec);
+    require_patterns(spec, indicator_layout(data));
     if (max_iter < 1) throw std::invalid_argument("max_iter must be >= 1");
     require_panel(data);
     const IndicatorLayout layout = indicator_layout(data);
@@ -3814,6 +5119,8 @@ DebugEmRun debug_em_from_params(const Panel& data, const Spec& spec, const Param
 }
 
 LogPosterior debug_log_posterior(const Panel& data, const Spec& spec, const Params& params) {
+    require_estep_threads(spec);
+    require_patterns(spec, indicator_layout(data));
     require_panel(data);
     const IndicatorLayout layout = indicator_layout(data);
     std::vector<int> analyzed;
@@ -3908,9 +5215,17 @@ FitResult fit(const Panel& data, const Spec& spec, void (*interrupt)()) {
     if (spec.K < 1) throw std::invalid_argument("n_states must be >= 1");
     if (spec.n_starts < 1) throw std::invalid_argument("n_starts must be >= 1");
     if (spec.n_threads < 1) throw std::invalid_argument("n_threads must be >= 1");
+    require_estep_threads(spec);
     validate_controls(spec);
     const PreparedPanel prepared = prepare_data(data);
     const IndicatorLayout layout = prepared.layout;
+    require_patterns(spec, layout);
+    if (spec.estep == ESTEP_STREAMING && layout.measurement != MEAS_CATEGORICAL) {
+        throw std::invalid_argument(
+            "estep=\"streaming\" is implemented for categorical models only. "
+            "Gaussian and mixed models stay on estep=\"stored\". "
+            "Streaming sufficient statistics for those families are later work.");
+    }
     if (layout.n_gaussian && (spec.cov_model < COV_EEI || spec.cov_model > COV_VVV)) {
         throw std::invalid_argument(
             "a Gaussian indicator block requires covariance EEI, VVI, EEE or VVV");
@@ -4038,7 +5353,7 @@ FitResult fit(const Panel& data, const Spec& spec, void (*interrupt)()) {
         if (!std::isfinite(ll)) return 0;
         for (int id : full_ids) {
             if (runs[id].converged && std::isfinite(runs[id].loglik) &&
-                std::abs(runs[id].loglik - ll) <= s.replicate_tol)
+                logliks_replicate(runs[id].loglik, ll, s.replicate_tol))
                 ++n;
         }
         return n;
@@ -4076,7 +5391,7 @@ FitResult fit(const Panel& data, const Spec& spec, void (*interrupt)()) {
     for (int id : full_ids) {
         if (runs[id].converged && std::isfinite(runs[id].loglik)) n_conv += 1;
         if (runs[id].converged && std::isfinite(runs[id].loglik) &&
-            std::abs(runs[id].loglik - runs[best].loglik) <= s.replicate_tol)
+            logliks_replicate(runs[id].loglik, runs[best].loglik, s.replicate_tol))
             n_best += 1;
     }
     FitResult r;
@@ -4106,6 +5421,11 @@ FitResult fit(const Panel& data, const Spec& spec, void (*interrupt)()) {
     r.n_threads = s.n_threads;
     r.tol = s.tol;
     r.replicate_tol = s.replicate_tol;
+    if (s.patterns == PATTERNS_COMPRESS) {
+        r.patterns = PATTERNS_COMPRESS;
+        r.n_patterns = runs[best].n_patterns;
+        r.pattern_id = runs[best].pattern_id;
+    }
     r.data_hash = hash_panel(data);
     r.params = runs[best].params;
     r.gamma = std::move(runs[best].fb.gamma);
@@ -4153,7 +5473,9 @@ FitResult fit(const Panel& data, const Spec& spec, void (*interrupt)()) {
     for (int id : full_ids) {
         if (id == best) continue;
         if (!std::isfinite(runs[id].loglik) || !std::isfinite(runs[best].loglik)) continue;
-        if (runs[id].loglik > runs[best].loglik + s.replicate_tol) higher.push_back(id);
+        if (runs[id].loglik > runs[best].loglik &&
+            !logliks_replicate(runs[id].loglik, runs[best].loglik, s.replicate_tol))
+            higher.push_back(id);
     }
     std::sort(higher.begin(), higher.end(), [&](int a, int b) {
         if (runs[a].loglik != runs[b].loglik) return runs[a].loglik > runs[b].loglik;
@@ -4164,7 +5486,7 @@ FitResult fit(const Panel& data, const Spec& spec, void (*interrupt)()) {
         if (clustered[id]) continue;
         int rep = id;
         for (int other : higher) {
-            if (std::abs(runs[other].loglik - runs[id].loglik) <= s.replicate_tol) {
+            if (logliks_replicate(runs[other].loglik, runs[id].loglik, s.replicate_tol)) {
                 clustered[other] = 1;
                 if (better_ll(other, rep) || other == rep) rep = other;
             }
@@ -4248,7 +5570,7 @@ FitResult add_starts(const Panel& data, const Spec& spec, const FitResult& previ
                 if (i >= f.start_phase.size() || f.start_phase[i] != 1) continue;
                 if (i >= f.start_converged.size() || !f.start_converged[i]) continue;
                 if (!std::isfinite(f.start_loglik[i])) continue;
-                if (std::abs(f.start_loglik[i] - ll) <= spec.replicate_tol) ++n;
+                if (logliks_replicate(f.start_loglik[i], ll, spec.replicate_tol)) ++n;
             }
         };
         scan(previous);
@@ -4293,10 +5615,11 @@ FitResult add_starts(const Panel& data, const Spec& spec, const FitResult& previ
     // Rejected parameters are stored in out's label order.
     FitResult other_labels = align_fit(data, spec, other, out.params, nullptr);
     if (std::isfinite(other.loglik) && std::isfinite(out.loglik) &&
-        other.loglik > out.loglik + spec.replicate_tol) {
+        other.loglik > out.loglik &&
+        !logliks_replicate(other.loglik, out.loglik, spec.replicate_tol)) {
         bool already = false;
         for (double ll : out.rejected_loglik)
-            if (std::abs(ll - other.loglik) <= spec.replicate_tol) already = true;
+            if (logliks_replicate(ll, other.loglik, spec.replicate_tol)) already = true;
         if (!already) {
             const int n = reps_of(other.loglik);
             int sid = -1;
@@ -4353,7 +5676,7 @@ FitResult add_starts(const Panel& data, const Spec& spec, const FitResult& previ
         if (i < out.start_phase.size() && out.start_phase[i] == 1 &&
             i < out.start_converged.size() && out.start_converged[i] &&
             std::isfinite(out.start_loglik[i]) &&
-            std::abs(out.start_loglik[i] - out.loglik) <= spec.replicate_tol)
+            logliks_replicate(out.start_loglik[i], out.loglik, spec.replicate_tol))
             n_best += 1;
     }
     out.n_best = n_best;
@@ -5027,6 +6350,9 @@ int blrt_hardware_threads() {
 
 namespace {
 
+// Acceptance ignores status and n_best. An unreplicated best log-likelihood
+// makes the fit unusable and changes the replication flags below. It does
+// not retry the draw and it does not reject a usable likelihood ratio.
 bool blrt_usable(const FitResult& fit) {
     return fit.admissible && fit.converged && std::isfinite(fit.loglik);
 }
@@ -5049,6 +6375,10 @@ BlrtDrawFit blrt_one_draw(const BlrtDrawJob& job, int draw, const Spec& h0, cons
         Spec s1 = h1;
         s0.n_threads = 1;
         s1.n_threads = 1;
+        // Replicates stay uncompressed so the draw seeds and the likelihood
+        // ratio use the historical subject-order sum.
+        s0.patterns = PATTERNS_NONE;
+        s1.patterns = PATTERNS_NONE;
         s0.has_start = false;
         s1.has_start = false;
         s0.append_supplied_start = false;
@@ -5128,6 +6458,8 @@ BlrtDrawFit blrt_one_draw(const BlrtDrawJob& job, int draw, const Spec& h0, cons
         out.ok = true;
         out.reason.clear();
         out.lr = 2.0 * (fit1.loglik - fit0.loglik);
+        // These flags consume n_best from logliks_replicate. They do not
+        // decide out.ok, the retry, or the likelihood ratio.
         out.h0_replicated = fit0.n_best >= 2;
         // Replication needs two alternative starts. A recovery attempt keeps
         // the scheduled search, so it is assessed when that total is at least 2.
@@ -5146,11 +6478,20 @@ BlrtDrawFit blrt_one_draw(const BlrtDrawJob& job, int draw, const Spec& h0, cons
 std::vector<BlrtDrawFit> blrt_fit_draws(const std::vector<BlrtDrawJob>& jobs, const Spec& h0,
                                         const Spec& h1, std::uint64_t base, int max_retries,
                                         int n_threads, void (*interrupt)(),
-                                        std::vector<WorkerLoad>* worker_loads) {
+                                        std::vector<WorkerLoad>* worker_loads,
+                                        const std::vector<int>& draw_ids) {
     if (worker_loads) worker_loads->clear();
     if (n_threads < 1) throw std::invalid_argument("n_threads must be at least 1");
     if (h0.n_starts < 1 || h1.n_starts < 1) throw std::invalid_argument("n_starts must be at least 1");
     const int n = static_cast<int>(jobs.size());
+    if (!draw_ids.empty() && static_cast<int>(draw_ids.size()) != n)
+        throw std::invalid_argument("draw_ids and jobs must have the same length");
+    std::vector<int> ids(static_cast<std::size_t>(std::max(n, 0)));
+    for (int index = 0; index < n; ++index) {
+        int draw = draw_ids.empty() ? index + 1 : draw_ids[static_cast<std::size_t>(index)];
+        if (draw < 1) throw std::invalid_argument("draw ids are 1-based");
+        ids[static_cast<std::size_t>(index)] = draw;
+    }
     std::vector<BlrtDrawFit> out(n);
     int cap = blrt_hardware_threads();
     int threads = std::min(n_threads, cap);
@@ -5159,7 +6500,10 @@ std::vector<BlrtDrawFit> blrt_fit_draws(const std::vector<BlrtDrawJob>& jobs, co
     WorkerPool pool(threads);
     pool.run(
         n,
-        [&](int index) { out[static_cast<size_t>(index)] = blrt_one_draw(jobs[static_cast<size_t>(index)], index + 1, h0, h1, base, max_retries); },
+        [&](int index) {
+            out[static_cast<size_t>(index)] = blrt_one_draw(
+                jobs[static_cast<size_t>(index)], ids[static_cast<size_t>(index)], h0, h1, base, max_retries);
+        },
         interrupt);
     if (worker_loads) {
         const auto& loads = pool.loads();

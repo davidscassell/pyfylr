@@ -2,7 +2,7 @@
 
 Latent profile, latent class, and latent transition models for Python. Release 1 estimates a first-order discrete-time Markov model with a C++17 core (Eigen 3.4.0, no external BLAS). The same core is used by [profylr](https://github.com/davidscassell/profylr).
 
-**BLRT is experimental and unvalidated.** `selection_rule()` keeps `blrt=False`, and a fitted model keeps `validated=False`. Do not use the bootstrap likelihood-ratio test for automatic model selection.
+**BLRT is experimental and unvalidated.** `selection_rule()` keeps `blrt=False`. A bootstrap result keeps `validated` false until the checks named in that result are shown, and an unvalidated result does not change the selected model. A fitted model does not carry a `validated` flag. Do not use the bootstrap likelihood-ratio test for automatic model selection.
 
 ## Install
 
@@ -13,7 +13,10 @@ pip install .
 pytest
 ```
 
-`pytest` needs the optional plot and scikit-learn extras (`pip install ".[plot,sklearn]" pytest`). Release 1 supports Linux x86_64 and Apple Silicon. Windows and Intel Mac are deferred and are not supported release targets.
+`pip install .` compiles the extension from source. It does not select a
+prebuilt wheel. Whether a release includes wheels is undecided.
+
+`pytest` needs the optional plot and scikit-learn extras (`pip install ".[plot,sklearn]" pytest`). Release 1 is tested on Linux x86_64 and Apple Silicon. Windows and Intel Mac are untested.
 
 The defaults are 40 random starts, a screen of 10, 4 full starts, `max_iter=200`, and `tol=1e-7`. Eigen's own multithreading is disabled. Random starts use private streams derived from the master seed, so one thread and several threads return the same fit.
 

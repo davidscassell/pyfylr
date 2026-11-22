@@ -35,6 +35,17 @@ import time
 import numpy as np
 import pandas as pd
 
+
+def _values(value):
+    """Return a missing parameter vector as an empty list.
+
+    A NumPy array cannot be used in ``value or []``.
+    """
+    if value is None:
+        return []
+    return value
+
+
 INDEX_NAMES = ("aic", "aic3", "bic", "sabic", "caic", "awe", "icl_bic")
 
 BIAS_NOTE = {
@@ -57,6 +68,7 @@ HARD_TOKENS = (
     "hard:best_loglik_not_replicated",
     "hard:higher_admissible_not_replicated",
     "hard:information_criterion_undefined",
+    "hard:posteriors_not_computed",
     "hard:second_seed_not_reproduced",
     "hard:second_seed_not_replicated",
     "hard:second_seed_not_assessed",
@@ -167,13 +179,16 @@ def raw_entropy(result):
 
     Stored core values win. Otherwise the entropies are recomputed from the
     smoothed state and the pairwise joints with the same chain rule as the
-    core. Non-positive mass contributes nothing.
+    core. Non-positive mass contributes nothing. A streaming fit that omitted
+    posteriors has no entropy; a stored zero is not that case.
     """
+    if result.get("posteriors_computed") is False:
+        return float("nan"), float("nan")
     stored_w = _stored_entropy(result, "entropy_wave_raw")
     stored_s = _stored_entropy(result, "entropy_sequence_raw")
     if stored_w is not None and stored_s is not None:
         return stored_w, stored_s
-    gamma = np.asarray(result.get("gamma") or [], dtype=float)
+    gamma = np.asarray(_values(result.get("gamma")), dtype=float)
     k = int(result.get("K") or 0)
     waves = int(result.get("n_waves") or 1)
     subjects = int(result.get("n_subjects") or 0)
@@ -183,7 +198,7 @@ def raw_entropy(result):
         return wave, sequence
     hw = 0.0
     hs = 0.0
-    xi = np.asarray(result.get("xi") or [], dtype=float)
+    xi = np.asarray(_values(result.get("xi")), dtype=float)
     for i in range(subjects):
         for t in range(waves):
             for state in range(k):
@@ -224,7 +239,10 @@ def information_criteria(fit):
     ll = result.get("loglik")
     waves = int(result.get("n_waves") or 1)
     supported = bool(result.get("ic_supported"))
-    hw, hs = raw_entropy(result)
+    if result.get("posteriors_computed") is False:
+        hw, hs = float("nan"), float("nan")
+    else:
+        hw, hs = raw_entropy(result)
     en = hs if waves >= 2 else hw
     out = {name: float("nan") for name in INDEX_NAMES}
     out.update({
@@ -248,7 +266,7 @@ def information_criteria(fit):
 
 
 def _gamma_cube(result):
-    gamma = np.asarray(result.get("gamma") or [], dtype=float)
+    gamma = np.asarray(_values(result.get("gamma")), dtype=float)
     k = int(result.get("K") or 0)
     waves = int(result.get("n_waves") or 1)
     subjects = int(result.get("n_subjects") or 0)
@@ -267,6 +285,20 @@ def classification_diagnostics(fit):
     returns a block per wave.
     """
     result = fit.result if hasattr(fit, "result") else fit
+    if result.get("posteriors_computed") is False:
+        k = int(result.get("K") or 0)
+        return {
+            "avepp": [float("nan")] * k,
+            "avepp_matrix": np.full((k, k), np.nan),
+            "min_avepp": float("nan"),
+            "occ": [float("nan")] * k,
+            "min_class_prop": float("nan"),
+            "min_class_n": float("nan"),
+            "entropy_wave": float("nan"),
+            "entropy_sequence": float("nan"),
+            "entropy_raw": float("nan"),
+            "by_wave": pd.DataFrame(columns=["wave", "state", "avepp", "occ", "class_n", "class_prop", "n_modal"]),
+        }
     panel = getattr(fit, "panel", None) or {}
     k = int(result.get("K") or 0)
     waves = int(result.get("n_waves") or 1)
@@ -286,7 +318,7 @@ def classification_diagnostics(fit):
         "entropy_raw": raw_entropy(result)[1 if waves >= 2 else 0],
         "by_wave": pd.DataFrame(columns=["wave", "state", "avepp", "occ", "class_n", "class_prop", "n_modal"]),
     }
-    membership = np.asarray(result.get("expected_membership") or [], dtype=float)
+    membership = np.asarray(_values(result.get("expected_membership")), dtype=float)
     n_analyzed = float(result.get("n_analyzed") or 0)
     mem = membership.reshape(waves, k) if membership.size == waves * k and k else None
     if mem is not None and n_analyzed > 0:
@@ -547,7 +579,10 @@ def _refit_second_seed(fit, offset):
     spec["seed"] = int(spec.get("seed", 1)) + int(offset)
     spec["has_start"] = False
     spec.pop("start", None)
-    return dict(_core.fit(fit.panel, spec))
+    spec.pop("compact", None)
+    from pyfylr import match_result_form
+
+    return match_result_form(dict(_core.fit(fit.panel, spec)), fit.result)
 
 
 def _wave_summary(fits, rule):
@@ -575,7 +610,7 @@ def _wave_summary(fits, rule):
         n_full=int(spec.get("n_full", spec.get("n_starts", 2))),
         max_iter=int(spec.get("max_iter", 200)),
         tol=float(spec.get("tol", 1e-7)),
-        replicate_tol=float(spec.get("replicate_tol", 1e-3)),
+        replicate_tol=float(spec.get("replicate_tol", 0.1)),
         seed=float(spec.get("seed", 1)),
         n_threads=int(spec.get("n_threads", 1)),
         align_labels=bool(spec.get("align_labels", True)),
@@ -604,7 +639,7 @@ def _wave_summary(fits, rule):
 def _sigma(result, state, block=0):
     name = result.get("covariance") or ""
     params = result["params"]
-    cov = np.asarray(params.get("cov") or [], dtype=float)
+    cov = np.asarray(_values(params.get("cov")), dtype=float)
     k = int(result["K"])
     j = int(result["n_gaussian"])
     if j < 1 or cov.size == 0 or not name:
@@ -796,11 +831,11 @@ def _simulate(fit, rng, donors, masks=None, as_panel=False):
     params = result["params"]
     delta = np.asarray(params["delta"], dtype=float)
     delta = delta / delta.sum()
-    tau = np.asarray(params.get("tau") or [], dtype=float)
-    means = np.asarray(params.get("means") or [], dtype=float)
+    tau = np.asarray(_values(params.get("tau")), dtype=float)
+    means = np.asarray(_values(params.get("means")), dtype=float)
     jg = int(result.get("n_gaussian") or 0)
     gidx = list(result.get("gaussian_index") or [])
-    rho = np.asarray(params.get("rho") or [], dtype=float)
+    rho = np.asarray(_values(params.get("rho")), dtype=float)
     observed = _masks(panel) if masks is None else masks
     if jg and rho.size == 0:
         return _simulate_gaussian(
@@ -891,7 +926,7 @@ def _split_null_state(source, k1):
     Returns None when the stored parameter vectors do not match the layout.
     The caller then retries without this extra candidate.
     """
-    from pyfylr import _core
+    from pyfylr import _core, as_lists, uses_compact_result
 
     result = source.result
     params = dict(result.get("params") or {})
@@ -902,8 +937,8 @@ def _split_null_state(source, k1):
     cov = result.get("covariance") or "EEI"
     if not cov:
         cov = "EEI"
-    tau = list(params.get("tau") or [])
-    means = list(params.get("means") or [])
+    tau = list(_values(params.get("tau")))
+    means = list(_values(params.get("means")))
     if result.get("n_tau_blocks") is None:
         n_tau = 0 if not tau else len(tau) // (k0 * k0)
     else:
@@ -911,18 +946,21 @@ def _split_null_state(source, k1):
     if result.get("gaussian_index") is None:
         n_mean = 1 if means else 0
         n_gaussian = len(means) // (n_mean * k0) if n_mean else 0
-        n_cov = 1 if params.get("cov") else 0
+        n_cov = 1 if len(_values(params.get("cov"))) else 0
     else:
         n_gaussian = len(result.get("gaussian_index") or [])
         n_mean = int(result.get("n_mean_blocks") or (1 if n_gaussian else 0))
         n_cov = int(result.get("n_cov_blocks") or (1 if n_gaussian else 0))
-    rho = list(params.get("rho") or [])
+    rho = list(_values(params.get("rho")))
     n_meas = int(result["n_meas_blocks"]) if result.get("n_meas_blocks") is not None else (1 if rho else 0)
     J = int(panel.get("J") or result.get("n_indicators") or 0)
     R = int(panel.get("Rmax") or result.get("Rmax") or 1)
-    return _core.split_null_state(
+    split = _core.split_null_state(
         params, k0, int(k1), str(cov), int(n_tau), int(n_meas), int(n_mean), int(n_cov), int(n_gaussian), J, R
     )
+    if split is None or uses_compact_result(result):
+        return split
+    return as_lists({"params": split})["params"]
 
 
 def _fit_like(template, frame, seed, n_starts=None, n_full=None, max_iter=None, start=None, append_start=False):
@@ -937,7 +975,7 @@ def _fit_like(template, frame, seed, n_starts=None, n_full=None, max_iter=None, 
         "n_full": full,
         "max_iter": cap,
         "tol": float(spec.get("tol", 1e-7)),
-        "replicate_tol": float(spec.get("replicate_tol", 1e-3)),
+        "replicate_tol": float(spec.get("replicate_tol", 0.1)),
         "n_threads": int(spec.get("n_threads", 1)),
         "seed": int(seed),
         "align_labels": False,
@@ -954,8 +992,10 @@ def _fit_like(template, frame, seed, n_starts=None, n_full=None, max_iter=None, 
 
 def _fit_prepared(template, panel, controls):
     """Fit a rectangular panel. Do not pass it through the data-frame constructor."""
-    from pyfylr import Fit, _core, lca_spec, lpa_spec, lta_spec
+    from pyfylr import Fit, _core, as_lists, lca_spec, lpa_spec, lta_spec, match_result_form
 
+    controls = dict(controls)
+    compact = controls.pop("compact", None)
     spec_in = template.spec
     result = template.result
     model = template.model
@@ -978,6 +1018,12 @@ def _fit_prepared(template, panel, controls):
         spec = lpa_spec(int(result["K"]), covariance=result.get("covariance") or "EEI", **controls)
         model_name = model
     raw = dict(_core.fit(panel, spec))
+    if compact is True:
+        pass
+    elif compact is False:
+        raw = as_lists(raw)
+    else:
+        raw = match_result_form(raw, result)
     return Fit(
         result=raw, panel=panel, spec=spec, model=model_name, engine=raw["engine"],
         draws=None, interval_type=raw.get("interval_type", "none"),
@@ -1101,8 +1147,8 @@ def _blrt_summary(B, b, n_ok, n_failed, n_not_replicated, n_failed_not_converged
         f" error: {int(n_failed_error)}). "
         f"{failure_text} "
         f"Successful draws={int(n_ok)}. b={int(b)}. "
-        f"Mplus TECH14 p=b/B={p:.6g} with B the successful draws. "
-        f"p_plus=(b+1)/(B+1)={p_plus:.6g} is secondary and is not compared with alpha."
+        f"Mplus TECH14 p=b/n_ok={p:.6g} with n_ok the kept draws. "
+        f"p_plus=(b+1)/(n_ok+1)={p_plus:.6g} is secondary and is not compared with alpha."
     )
     if warn:
         reason += (
@@ -1120,11 +1166,14 @@ def _blrt_summary(B, b, n_ok, n_failed, n_not_replicated, n_failed_not_converged
 
 
 def blrt_null_size(alpha, B):
-    """Null rejection probability of ``p = b/B`` when every draw is kept.
+    """Null rejection probability when every requested draw is kept.
 
-    Under H0 with continuous ranks the observed likelihood ratio is equally
-    likely to sit in any of the ``B + 1`` positions. ``b/B <= alpha`` on
-    ``floor(alpha * B) + 1`` of those positions.
+    The reported BLRT ``p`` is ``b/n_ok`` (undefined when no draw is kept).
+    This helper is that rule's null probability when every requested draw is
+    kept, so ``n_ok`` equals ``B`` and the probability is
+    ``(floor(alpha * B) + 1) / (B + 1)``. Under H0 with continuous ranks the
+    observed likelihood ratio is equally likely to sit in any of the
+    ``B + 1`` positions.
     """
     alpha = float(alpha)
     draws = int(B)
@@ -1153,7 +1202,7 @@ def _blrt_fit_spec(template, n_starts, n_full, max_iter):
         "n_full": int(n_full),
         "max_iter": int(max_iter),
         "tol": float(spec.get("tol", 1e-7)),
-        "replicate_tol": float(spec.get("replicate_tol", 1e-3)),
+        "replicate_tol": float(spec.get("replicate_tol", 0.1)),
         "n_threads": 1,
         "seed": 1,
         "align_labels": False,
@@ -1180,40 +1229,116 @@ def _blrt_fit_spec(template, n_starts, n_full, max_iter):
     return out
 
 
-def _blrt_draw_pool(h0, h1, B, max_retries, base, cap, s0, f0, s1, f1, n_threads):
+def _merge_blrt_raw(parts):
+    """Concatenate per-batch engine rows in call order. Worker times are sums."""
+    merged = {
+        "ok": [], "reason": [], "lr": [],
+        "h0_replicated": [], "h1_replicated": [],
+        "h1_best_fit_replicated": [], "h1_replication_assessed": [],
+        "attempt_draw": [], "attempt_retry": [], "attempt_starts": [],
+        "attempt_starts_h0": [], "attempt_starts_h1": [], "attempt_h1_embedded": [],
+        "worker_jobs": [], "worker_busy_s": [],
+        "n_threads_used": 1,
+        "seconds_convert": 0.0, "seconds_engine": 0.0, "seconds_export": 0.0,
+    }
+    for part in parts:
+        for key in (
+            "ok", "reason", "lr", "h0_replicated", "h1_replicated",
+            "h1_best_fit_replicated", "h1_replication_assessed",
+            "attempt_draw", "attempt_retry", "attempt_starts",
+            "attempt_starts_h0", "attempt_starts_h1", "attempt_h1_embedded",
+        ):
+            merged[key].extend(part[key])
+        jobs = [int(value) for value in part["worker_jobs"]]
+        busy = [float(value) for value in part["worker_busy_s"]]
+        width = max(len(merged["worker_jobs"]), len(jobs))
+        if len(merged["worker_jobs"]) < width:
+            merged["worker_jobs"].extend([0] * (width - len(merged["worker_jobs"])))
+            merged["worker_busy_s"].extend([0.0] * (width - len(merged["worker_busy_s"])))
+        for index, value in enumerate(jobs):
+            merged["worker_jobs"][index] += value
+            merged["worker_busy_s"][index] += busy[index]
+        merged["n_threads_used"] = max(int(merged["n_threads_used"]), int(part["n_threads_used"]))
+        merged["seconds_convert"] += float(part["seconds_convert"])
+        merged["seconds_engine"] += float(part["seconds_engine"])
+        merged["seconds_export"] += float(part["seconds_export"])
+    return merged
+
+
+def _blrt_batch_size(B, n_threads, batch_size):
+    requested = int(B)
+    threads = int(n_threads)
+    if threads < 1:
+        raise ValueError("n_threads must be at least 1")
+    if batch_size is None:
+        batch = threads
+    else:
+        batch = int(batch_size)
+    if batch < 1:
+        raise ValueError("batch_size must be at least 1")
+    if requested > 0 and batch > requested:
+        batch = requested
+    return batch
+
+
+def _blrt_one_draw_panel(h0, base, draw, masks):
+    """Simulate draw ``draw`` (0-based) with the historical per-draw seed."""
+    n = int(h0.panel["N"])
+    rng = np.random.default_rng(int(base) + 1000 * (int(draw) + 1))
+    donors = rng.integers(0, n, size=n)
+    try:
+        if str(h0.panel.get("measurement")) == "gaussian":
+            built, digest = _simulate(h0, rng, donors, masks=masks, as_panel=True)
+            frame = built
+        else:
+            frame = _simulate(h0, rng, donors, masks=masks)
+            built = _prepare_bootstrap_panel(h0, frame)
+            digest = _dataset_hash(frame)
+    except (np.linalg.LinAlgError, ValueError):
+        frame = None
+    if frame is None:
+        return None, "", 0
+    return built, digest, 1
+
+
+def _blrt_draw_pool(h0, h1, B, max_retries, base, cap, s0, f0, s1, f1, n_threads, batch_size=None):
     from pyfylr import _core
 
-    frames = []
-    hashes = []
-    present = []
-    n = int(h0.panel["N"])
+    requested = int(B)
+    batch = _blrt_batch_size(requested, n_threads, batch_size)
+    hashes = [""] * requested
     masks = _masks(h0.panel)
-    prep_t0 = time.perf_counter()
-    for draw in range(int(B)):
-        rng = np.random.default_rng(int(base) + 1000 * (draw + 1))
-        donors = rng.integers(0, n, size=n)
-        try:
-            if str(h0.panel.get("measurement")) == "gaussian":
-                built, digest = _simulate(h0, rng, donors, masks=masks, as_panel=True)
-                frame = built
-            else:
-                frame = _simulate(h0, rng, donors, masks=masks)
-                built = _prepare_bootstrap_panel(h0, frame)
-                digest = _dataset_hash(frame)
-        except (np.linalg.LinAlgError, ValueError):
-            frame = None
-        if frame is None:
-            frames.append(None)
-            hashes.append("")
-            present.append(0)
-            continue
-        frames.append(built)
-        hashes.append(digest)
-        present.append(1)
-    seconds_prepare = time.perf_counter() - prep_t0
     spec0 = _blrt_fit_spec(h0, s0, f0, cap)
     spec1 = _blrt_fit_spec(h1, s1, f1, cap)
-    raw = _core.blrt_fit_draws(frames, present, spec0, spec1, int(base), int(max_retries), int(n_threads))
+    parts = []
+    seconds_prepare = 0.0
+    # An exception here, or inside blrt_fit_draws, leaves this function.
+    # Earlier batches are not returned. Python does not poll an interrupt
+    # inside the C++ pool; R does, between waves of one batch.
+    starts = range(0, requested, batch) if requested > 0 else [0]
+    for start in starts:
+        stop = min(start + batch, requested)
+        frames = []
+        present = []
+        draw_ids = []
+        prep_t0 = time.perf_counter()
+        for draw in range(start, stop):
+            built, digest, flag = _blrt_one_draw_panel(h0, base, draw, masks)
+            frames.append(built)
+            present.append(flag)
+            draw_ids.append(draw + 1)
+            if flag:
+                hashes[draw] = digest
+        seconds_prepare += time.perf_counter() - prep_t0
+        raw = _core.blrt_fit_draws(
+            frames, present, spec0, spec1, int(base), int(max_retries), int(n_threads), draw_ids
+        )
+        del frames
+        parts.append(raw)
+    if not parts:
+        raw = _core.blrt_fit_draws([], [], spec0, spec1, int(base), int(max_retries), int(n_threads))
+        parts.append(raw)
+    raw = _merge_blrt_raw(parts)
     asm_t0 = time.perf_counter()
     lrs = []
     lr_draws = []
@@ -1432,17 +1557,23 @@ def _blrt_publish(canonical, telemetry):
 
 
 def blrt_check(h0, h1, B=1000, max_retries=3, alpha=0.05, seed=None, max_iter=None, n_threads=1,
-               experimental=False):
+               experimental=False, batch_size=None):
     """Parametric bootstrap likelihood-ratio test of h0 against h1.
 
-    ``p = b/B`` is reported. ``p_plus = (b+1)/(B+1)`` is secondary. The
-    likelihood is the returned admissible converged start; a rejected start is
-    never substituted. Each bootstrap dataset is simulated once, and a retry
-    estimates that same dataset with more starts. ``validated`` stays false until
+    ``p = b/n_ok`` when at least one draw is kept, and is undefined when
+    ``n_ok`` is 0. ``p_plus = (b+1)/(n_ok+1)`` uses that same successful-draw
+    count. The plus-one bounds ``p_lo`` and ``p_hi`` still divide by the
+    requested ``B + 1``. The likelihood is the returned admissible converged
+    start; a rejected start is never substituted. Each bootstrap dataset is
+    simulated once, and a retry estimates that same dataset with more starts.
+    ``validated`` stays false until
     Monte Carlo agreement, shared-dataset likelihoods, and operating
     characteristics are shown. Independent bootstrap p-values are not required
     to match. ``select_model`` does not let an unvalidated result change the
     selected model. The bootstrap does not run unless ``experimental`` is true.
+    ``batch_size`` bounds how many simulated datasets the threaded pool holds
+    at once. The default is ``n_threads``. Draw ids and seeds do not depend on
+    it. ``n_threads == 1`` still uses the one-draw serial loop.
     """
     if not experimental:
         skipped = {
@@ -1452,7 +1583,7 @@ def blrt_check(h0, h1, B=1000, max_retries=3, alpha=0.05, seed=None, max_iter=No
             "p_lo": float("nan"), "p_hi": float("nan"),
             "b": 0, "f": 0, "B": int(B), "alpha": float(alpha),
             "reason": (
-                "not run: experimental BLRT requires explicit opt-in (experimental=TRUE). "
+                "not run: experimental BLRT requires explicit opt-in (experimental=True). "
                 "blrt validated=false. Excluded from automatic selection."
             ),
         }
@@ -1531,7 +1662,9 @@ def blrt_check(h0, h1, B=1000, max_retries=3, alpha=0.05, seed=None, max_iter=No
     started = time.perf_counter()
     telemetry = {"n_threads_used": 1}
     if n_threads > 1:
-        pooled = _blrt_draw_pool(h0, h1, B, max_retries, base, cap, s0, f0, s1, f1, n_threads)
+        pooled = _blrt_draw_pool(
+            h0, h1, B, max_retries, base, cap, s0, f0, s1, f1, n_threads, batch_size=batch_size
+        )
         lrs = pooled["lrs"]
         lr_draws = pooled["lr_draws"]
         out["failures"] = pooled["failures"]
@@ -1669,8 +1802,11 @@ def select_model(fits, rule=None, auto=True, second_seed_loglik=None, second_see
     seed. Class size, AvePP, and entropy are reported. They filter only when
     the analyst supplies a threshold. The primary index is BIC. ICL-BIC is a
     diagnostic. An unvalidated BLRT does not change the selected model.
+    A streaming fit that omitted posteriors is excluded from automatic
+    ranking: it is not eligible, because ``hard:posteriors_not_computed`` is
+    recorded and the information criteria that need a posterior are missing.
     """
-    from pyfylr import Grid, WaveEnumeration, compare_models
+    from pyfylr import Grid, WaveEnumeration, _core, compare_models
 
     if isinstance(fits, WaveEnumeration):
         raise ValueError(
@@ -1734,7 +1870,7 @@ def select_model(fits, rule=None, auto=True, second_seed_loglik=None, second_see
             "collapsed": collapsed,
             "n_starts": int(result.get("n_starts") or 0),
             "n_best": int(result.get("n_best") or 0),
-            "replicate_tol": float(getattr(fit, "spec", {}).get("replicate_tol", 1e-3) or 1e-3),
+            "replicate_tol": float(getattr(fit, "spec", {}).get("replicate_tol", 0.1) or 0.1),
             "fit": fit,
         }
         for name in INDEX_NAMES:
@@ -1762,6 +1898,8 @@ def select_model(fits, rule=None, auto=True, second_seed_loglik=None, second_see
             tokens.add("hard:higher_admissible_not_replicated")
         if not _finite(row[primary]):
             tokens.add("hard:information_criterion_undefined")
+        if row["fit"].result.get("posteriors_computed") is False:
+            tokens.add("hard:posteriors_not_computed")
         row["preseed"] = tokens
 
     for i, row in enumerate(rows):
@@ -1796,7 +1934,11 @@ def select_model(fits, rule=None, auto=True, second_seed_loglik=None, second_see
         row["second_seed_n_best"] = nbest
         if _finite(ll2) and row["finite"]:
             row["second_seed_abs_gap"] = abs(ll2 - row["loglik"])
-        if not _finite(ll2) or (row["finite"] and abs(ll2 - row["loglik"]) > row["replicate_tol"]):
+        if not _finite(ll2) or (
+            row["finite"] and not _core.logliks_replicate(
+                float(ll2), float(row["loglik"]), float(row["replicate_tol"])
+            )
+        ):
             row["preseed"].add("hard:second_seed_not_reproduced")
         if nbest < 2:
             row["preseed"].add("hard:second_seed_not_replicated")
@@ -1834,7 +1976,7 @@ def select_model(fits, rule=None, auto=True, second_seed_loglik=None, second_see
         "ran": False, "validated": False, "switched": False, "ambiguous_kind": "",
         "reason": (
             "BLRT is off by default. The procedure follows Mplus TECH14 "
-            "(p=b/B, and a draw whose best log-likelihood did not replicate is kept). "
+            "(p=b/n_ok, and a draw whose best log-likelihood did not replicate is kept). "
             "Independent bootstrap p-values are not required to match. "
             "validated stays false until Monte Carlo agreement, shared-dataset likelihoods, and operating characteristics are shown. "
             "An unreplicated kept solution is a diagnostic and is not a validation failure."
@@ -1860,7 +2002,7 @@ def select_model(fits, rule=None, auto=True, second_seed_loglik=None, second_see
             blrt["decision"] = "not_run"
             blrt["reason"] = (
                 "not run: experimental BLRT is excluded from automatic selection. "
-                "blrt validated=false. Pass experimental_blrt=TRUE for a report-only result. "
+                "blrt validated=false. Pass experimental_blrt=True for a report-only result. "
                 "That result does not change the selected model."
             )
         elif chosen is not None and rule["blrt"] and (ambiguous or rule["blrt_check"]):
@@ -1998,6 +2140,9 @@ def plot_ic_elbow(selection, ax=None):
 
 def plot_avepp(fit, ax=None):
     """Heatmap of mean posteriors by modal class. The diagonal is AvePP."""
+    result = fit.result if hasattr(fit, "result") else fit
+    if result.get("posteriors_computed") is False:
+        raise ValueError("posteriors were not computed; refit with posteriors=True")
     import matplotlib.pyplot as plt
 
     diag = classification_diagnostics(fit)
@@ -2023,9 +2168,11 @@ def plot_avepp(fit, ax=None):
 
 def plot_max_posterior(fit, ax=None):
     """Histogram of the maximum posterior probability for each person-wave."""
+    result = fit.result
+    if result.get("posteriors_computed") is False:
+        raise ValueError("posteriors were not computed; refit with posteriors=True")
     import matplotlib.pyplot as plt
 
-    result = fit.result
     cube = _gamma_cube(result)
     if cube is None:
         raise ValueError("this fit has no posterior to plot")
@@ -2040,16 +2187,29 @@ def plot_max_posterior(fit, ax=None):
     return ax
 
 
-def plot_prevalence(fit, ax=None):
-    """Expected class proportion by wave."""
-    import matplotlib.pyplot as plt
+def plot_prevalence(fit, ax=None, kind="posterior"):
+    """Class proportion by wave.
 
+    ``kind`` is ``posterior`` (expected membership), ``hard``, or ``model``.
+    Posterior and hard draws require a computed posterior. Model-implied
+    prevalence does not.
+    """
+    if kind not in ("model", "posterior", "hard"):
+        raise ValueError("kind must be 'model', 'posterior', or 'hard'")
     result = fit.result
+    if kind != "model":
+        from pyfylr import _require_posteriors
+        _require_posteriors(result)
+    import matplotlib.pyplot as plt
     k = int(result["K"])
     waves = int(result["n_waves"])
-    membership = np.asarray(result.get("expected_membership") or [], dtype=float).reshape(waves, k)
-    n = float(result["n_analyzed"])
-    prop = membership / n
+    if kind == "model":
+        prop = np.asarray(result["prevalence_model"], dtype=float).reshape(waves, k)
+    elif kind == "hard":
+        prop = np.asarray(result["prevalence_hard"], dtype=float).reshape(waves, k)
+    else:
+        membership = np.asarray(_values(result.get("expected_membership")), dtype=float).reshape(waves, k)
+        prop = membership / float(result["n_analyzed"])
     labels = list((fit.panel or {}).get("waves") or list(range(1, waves + 1)))
     fig, ax = plt.subplots() if ax is None else (ax.figure, ax)
     x = np.arange(waves)

@@ -16,6 +16,17 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+
+def _values(value):
+    """Return a missing numeric vector as an empty list.
+
+    Compact results store these vectors as NumPy arrays, and an array
+    cannot be used in ``value or []``.
+    """
+    if value is None:
+        return []
+    return value
+
 from pyfylr import _core
 
 __version__ = "0.1.0"
@@ -28,6 +39,7 @@ __all__ = [
     "accept",
     "add_starts",
     "align_states",
+    "as_lists",
     "compare_invariance",
     "blrt_check",
     "blrt_last_telemetry",
@@ -53,6 +65,7 @@ __all__ = [
     "lca_spec",
     "lpa_spec",
     "lta_spec",
+    "logliks_replicate",
     "information_criteria",
     "plot_avepp",
     "plot_fit_criteria",
@@ -84,6 +97,11 @@ __all__ = [
 
 
 def build_info() -> dict:
+    """Compiler and package identifiers for this build.
+
+    The dictionary includes the shared-core fields plus ``package``,
+    ``version``, and ``engine``.
+    """
     info = dict(_core.build_info())
     info["package"] = "pyfylr"
     info["version"] = __version__
@@ -91,10 +109,67 @@ def build_info() -> dict:
     return info
 
 
+# Matches lta::kMaxEstepThreads. Below every 32-bit INT_MAX.
+_MAX_ESTEP_THREADS = 1024
+
+
+def _estep_thread_count(value):
+    """A finite whole number from 1 to 1024. Checked before the value is a native int."""
+    message = "estep_threads must be a finite whole number from 1 to 1024"
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(message)
+    if isinstance(value, (int, np.integer)):
+        if value < 1 or value > _MAX_ESTEP_THREADS:
+            raise ValueError(message)
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        number_f = float(value)
+        if (not np.isfinite(number_f) or not number_f.is_integer() or number_f < 1 or
+                number_f > _MAX_ESTEP_THREADS):
+            raise ValueError(message)
+        return int(number_f)
+    raise ValueError(message)
+
+
+def _pattern_mode(value):
+    """'none' or 'compress', checked before the value is stored as an enum."""
+    if isinstance(value, bool) or not isinstance(value, str) or value not in ("none", "compress"):
+        raise ValueError('patterns must be "none" or "compress"')
+    return value
+
+
 def lta_spec(n_states, covariance="VVV", measurement_invariant=True, means_invariant=True,
              covariance_invariant=True, transitions="equal", n_starts=40, screen_iter=10,
-             n_full=4, max_iter=200, tol=1e-7, replicate_tol=1e-3, n_threads=1, seed=1,
-             align_labels=True, covariates=None, start=None, append_start=False):
+             n_full=4, max_iter=200, tol=1e-7, replicate_tol=0.1, n_threads=1, seed=1,
+             align_labels=True, covariates=None, start=None, append_start=False,
+             estep="stored", posteriors=True, estep_threads=1, patterns="none"):
+    """Latent transition specification.
+
+    ``measurement_invariant``, ``means_invariant``, and
+    ``covariance_invariant`` hold those blocks equal across waves.
+    ``n_starts``, ``screen_iter``, and ``n_full`` are the random-start
+    schedule. ``start`` is an optional supplied start. ``append_start``
+    adds that start to the random starts. Without ``append_start``, a
+    supplied start replaces them, ``has_start`` is set, and ``n_starts``
+    becomes 1.
+
+    The dictionary always contains ``K``, ``covariance``,
+    ``measurement_invariant``, ``means_invariant``,
+    ``covariance_invariant``, ``transition_equal``, ``n_starts``,
+    ``screen_iter``, ``n_full``, ``max_iter``, ``tol``,
+    ``replicate_tol``, ``n_threads``, ``seed``, and ``align_labels``.
+    ``estep`` is stored only when it is not ``stored``. ``posteriors``
+    is stored only when it is false. ``estep_threads`` is stored only
+    when it is not 1. ``patterns`` is stored only when it is not
+    ``none``. A supplied start is stored under ``start``, and appending
+    it also sets ``append_supplied_start``.
+
+    ``estep`` is ``stored`` or ``streaming``. ``posteriors`` returns
+    state probabilities. ``estep_threads`` is the thread count inside
+    one E-step, forced to 1 when a start or bootstrap worker is already
+    running. ``patterns`` is ``none`` or ``compress``. Covariates are
+    refused.
+    """
     if covariates:
         raise ValueError(
             "Covariates are not estimated in Release 1. Pass indicators only. "
@@ -119,6 +194,19 @@ def lta_spec(n_states, covariance="VVV", measurement_invariant=True, means_invar
         "seed": int(seed),
         "align_labels": bool(align_labels),
     }
+    if estep not in ("stored", "streaming"):
+        raise ValueError("estep must be 'stored' or 'streaming'")
+    # Absent keys keep the historical spec: stored E-step, posteriors returned.
+    if estep != "stored":
+        spec["estep"] = estep
+    if not posteriors:
+        spec["posteriors"] = False
+    threads = _estep_thread_count(estep_threads)
+    if threads != 1:
+        spec["estep_threads"] = threads
+    mode = _pattern_mode(patterns)
+    if mode != "none":
+        spec["patterns"] = mode
     if start is not None:
         spec["start"] = start
         if append_start:
@@ -129,12 +217,26 @@ def lta_spec(n_states, covariance="VVV", measurement_invariant=True, means_invar
     return spec
 
 
+def logliks_replicate(ll, best, replicate_tol=0.1):
+    """True when ``abs(ll - best) <= replicate_tol``.
+
+    ``replicate_tol`` defaults to ``0.1``, chosen to be comparable to the
+    approximately 0.1 tolerance Muthén described on the Mplus discussion
+    board (2018); Mplus does not document an exact value. A caller can set
+    a different value. The test does not scale with N or with the
+    log-likelihood.
+    """
+    return bool(_core.logliks_replicate(float(ll), float(best), float(replicate_tol)))
+
+
 def lpa_spec(n_states, covariance="VVV", **kwargs):
+    """Latent profile specification. Transitions stay equal. See ``lta_spec``."""
     kwargs.setdefault("transitions", "equal")
     return lta_spec(n_states, covariance=covariance, **kwargs)
 
 
 def lca_spec(n_states, **kwargs):
+    """Latent class specification. The covariance is unset. See ``lta_spec``."""
     kwargs["covariance"] = None
     return lta_spec(n_states, **kwargs)
 
@@ -381,6 +483,8 @@ def prepare_panel(data: pd.DataFrame, indicators: list[str], id: str, wave: str 
 
 @dataclass
 class Fit:
+    """A fitted model: the core result, the panel, and the specification."""
+
     result: dict
     panel: dict
     spec: dict
@@ -426,7 +530,7 @@ class Fit:
         for k, value in enumerate(p["delta"]):
             rows.append({"parameter": "initial", "state": k + 1, "to": np.nan, "variable": np.nan,
                          "category": np.nan, "wave": np.nan, "estimate": value})
-        if p["tau"]:
+        if len(p["tau"]):
             blocks = len(p["tau"]) // (K * K)
             for b in range(blocks):
                 for j in range(K):
@@ -438,7 +542,7 @@ class Fit:
                             "estimate": p["tau"][(b * K + j) * K + k],
                         })
         names = self.panel["indicators"]
-        if p["rho"]:
+        if len(p["rho"]):
             J = self.panel["J"]
             R = self.result["Rmax"]
             blocks = len(p["rho"]) // (J * K * R)
@@ -454,7 +558,7 @@ class Fit:
                                 "wave": np.nan if self.result["measurement_invariant"] else b + 1,
                                 "estimate": p["rho"][((b * J + j) * K + k) * R + r],
                             })
-        if p["means"]:
+        if len(p["means"]):
             Jg = self.result["n_gaussian"]
             blocks = len(p["means"]) // (K * Jg)
             gidx = self.result["gaussian_index"]
@@ -471,6 +575,7 @@ class Fit:
 
     def augment(self) -> pd.DataFrame:
         r = self.result
+        _require_posteriors(r)
         N, T, K = r["n_subjects"], r["n_waves"], r["K"]
         rows = []
         for i, subject in enumerate(self.panel["ids"]):
@@ -504,41 +609,124 @@ class Fit:
         return pd.DataFrame({"iteration": self.result["trace_iter"], "loglik": self.result["trace_ll"]})
 
 
-def _fit(data, indicators, id, wave, spec, model):
+def _require_posteriors(result):
+    if result.get("posteriors_computed") is False:
+        raise ValueError("posteriors were not computed; refit with posteriors=True")
+
+
+_COMPACT_FLOAT_KEYS = (
+    "gamma", "filtered", "xi",
+    "prevalence_model", "prevalence_posterior", "prevalence_hard",
+    "expected_membership", "expected_transitions", "hard_transitions",
+    "start_loglik", "rejected_loglik",
+)
+_COMPACT_PARAM_KEYS = ("delta", "tau", "rho", "means", "cov")
+
+
+def _to_float_list(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
+def as_lists(result):
+    """Copy a compact fit result back to the historical list structure.
+
+    ``fit_lta``, ``fit_lpa``, and ``fit_lca`` already return that structure
+    unless ``compact=True``. ``ndarray.tolist`` is the conversion.
+    """
+    out = dict(result)
+    params = out.get("params")
+    if isinstance(params, dict):
+        copied = dict(params)
+        for key in _COMPACT_PARAM_KEYS:
+            if key in copied:
+                copied[key] = _to_float_list(copied[key])
+        out["params"] = copied
+    for key in _COMPACT_FLOAT_KEYS:
+        if key in out:
+            out[key] = _to_float_list(out[key])
+    return out
+
+
+def uses_compact_result(result):
+    """True when a fit result stores posteriors or parameters as arrays."""
+    if not isinstance(result, dict):
+        return False
+    if isinstance(result.get("gamma"), np.ndarray):
+        return True
+    params = result.get("params")
+    if isinstance(params, dict):
+        return any(isinstance(params.get(key), np.ndarray) for key in _COMPACT_PARAM_KEYS)
+    return False
+
+
+def match_result_form(raw, like):
+    """Keep ``raw`` compact when ``like`` is compact, and lists otherwise."""
+    if uses_compact_result(like):
+        return raw
+    return as_lists(raw)
+
+
+def _fit(data, indicators, id, wave, spec, model, compact=False):
     panel = prepare_panel(data, indicators, id, wave, family=spec.get("family_map"))
     raw = dict(_core.fit(panel, spec))
+    if not compact:
+        raw = as_lists(raw)
     fit = Fit(result=raw, panel=panel, spec=spec, model=model, engine=raw["engine"],
               draws=None, interval_type=raw["interval_type"])
     return fit
 
 
 def fit_lta(data, indicators, id, wave, n_states=2, family=None, covariance="VVV", **kwargs):
+    """Fit a latent transition model. ``id`` and ``wave`` are required.
+
+    Returns a ``Fit``. ``wave`` is the wave column, not an optional label.
+    """
+    compact = kwargs.pop("compact", False)
     spec = lta_spec(n_states, covariance=covariance, **kwargs)
     spec["family_map"] = family
-    return _fit(data, list(indicators), id, wave, spec, "lta")
+    return _fit(data, list(indicators), id, wave, spec, "lta", compact=compact)
 
 
 def fit_lpa(data, indicators, id=None, n_states=2, covariance="VVV", family=None, **kwargs):
+    """Fit a latent profile model and return a ``Fit``.
+
+    ``id`` is synthesized, one row per subject, when it is omitted.
+    """
+    compact = kwargs.pop("compact", False)
     frame = data.copy()
     if id is None:
         frame = frame.assign(_id=np.arange(len(frame)))
         id = "_id"
     spec = lpa_spec(n_states, covariance=covariance, **kwargs)
+    if spec.get("patterns") == "compress":
+        raise ValueError(
+            'patterns="compress" is implemented for categorical models only. '
+            'Gaussian and mixed models stay on patterns="none".'
+        )
     spec["family_map"] = family
-    return _fit(frame, list(indicators), id, None, spec, "lpa")
+    return _fit(frame, list(indicators), id, None, spec, "lpa", compact=compact)
 
 
 def fit_lca(data, indicators, id=None, wave=None, n_states=2, family=None, **kwargs):
+    """Fit a latent class model and return a ``Fit``."""
+    compact = kwargs.pop("compact", False)
     frame = data.copy()
     if id is None:
         frame = frame.assign(_id=np.arange(len(frame)))
         id = "_id"
     spec = lca_spec(n_states, **kwargs)
     spec["family_map"] = family
-    return _fit(frame, list(indicators), id, wave, spec, "lca")
+    return _fit(frame, list(indicators), id, wave, spec, "lca", compact=compact)
 
 
 def describe_indicators(data, indicators, id, wave=None, by_wave=False, family=None) -> pd.DataFrame:
+    """Per-indicator counts, missingness, and detected family.
+
+    ``by_wave`` repeats the summary on each occasion. ``family`` overrides
+    detection. The result is one row per indicator, or per indicator and wave.
+    """
     panel = prepare_panel(data, list(indicators), id, wave, family=family)
     rows = [dict(r) for r in _core.describe_indicators(panel, by_wave)]
     for row in rows:
@@ -549,6 +737,7 @@ def describe_indicators(data, indicators, id, wave=None, by_wave=False, family=N
 
 
 def correlate_indicators(data, indicators, id=None, wave=None, family=None) -> pd.DataFrame:
+    """Pairwise associations among the indicators."""
     frame = data.copy()
     if id is None:
         frame = frame.assign(_id=np.arange(len(frame)))
@@ -566,6 +755,7 @@ def correlate_indicators(data, indicators, id=None, wave=None, family=None) -> p
 
 
 def fiml_moments(data, indicators, id=None, wave=None, covariance="VVV", family=None) -> dict:
+    """Full-information mean, covariance, and correlation."""
     if covariance not in ("VVV", "EEI"):
         raise ValueError("fiml_moments accepts VVV (unrestricted) or EEI (diagonal)")
     frame = data.copy()
@@ -583,6 +773,7 @@ def fiml_moments(data, indicators, id=None, wave=None, covariance="VVV", family=
 
 
 def describe_missingness(data, indicators, id, wave=None, family=None) -> dict:
+    """Counts, missingness patterns, and excluded ids. Not a fitted model."""
     panel = prepare_panel(data, list(indicators), id, wave, family=family)
     out = dict(_core.describe_missingness(panel))
     out["excluded_ids"] = [panel["ids"][i] for i in out["excluded_subjects"]]
@@ -590,6 +781,7 @@ def describe_missingness(data, indicators, id, wave=None, family=None) -> dict:
 
 
 def standardize_indicators(data, indicators, id, wave=None, scope="pooled") -> pd.DataFrame:
+    """Replace Gaussian indicators with standardized values."""
     if scope not in ("pooled", "within_wave"):
         raise ValueError("scope must be 'pooled' or 'within_wave'. The default is pooled.")
     panel = prepare_panel(data, list(indicators), id, wave)
@@ -630,6 +822,7 @@ def standardize_indicators(data, indicators, id, wave=None, scope="pooled") -> p
 
 
 def describe_profiles(fit: Fit, reference_sd=None) -> pd.DataFrame:
+    """Profile means or response probabilities, optionally in reference SD units."""
     rows = [dict(r) for r in _core.describe_profiles(fit.panel, fit.spec, fit.result, reference_sd)]
     for row in rows:
         row["variable"] = fit.panel["indicators"][row["variable"]]
@@ -675,14 +868,21 @@ _WARNING = (
     "ill_conditioned_covariance",
     "collapsed_component",
     "numerically_empty_state",
+    "posteriors_not_computed",
 )
-_MEASUREMENT_BLOCK = ("not_positive_definite", "collapsed_component", "numerically_empty_state")
+_MEASUREMENT_BLOCK = (
+    "not_positive_definite",
+    "collapsed_component",
+    "numerically_empty_state",
+    "posteriors_not_computed",
+)
 _COMPARISON_BLOCK = (
     "variance_floor",
     "replication_not_assessed",
     "not_positive_definite",
     "collapsed_component",
     "numerically_empty_state",
+    "posteriors_not_computed",
 )
 _NOTE_ONLY = ("boundary_parameters", "ill_conditioned_covariance")
 _PROCEDURES = ("model_comparison", "assignment", "measurement", "transitions", "further_starts")
@@ -764,7 +964,7 @@ def _reliability(result: dict) -> tuple[bool, str, str]:
 
 
 def _mean_max_posterior(result: dict) -> float:
-    gamma = np.asarray(result.get("gamma") or [], dtype=float)
+    gamma = np.asarray(_values(result.get("gamma")), dtype=float)
     k = int(result["K"])
     if gamma.size == 0 or k < 1 or gamma.size % k:
         return np.nan
@@ -877,6 +1077,7 @@ def _plain(value):
 
 
 def compare_models(fits, wave=None, role=None, min_proportion=None, min_expected_n=None) -> pd.DataFrame:
+    """One row per fit. ``wave`` and ``role`` are labels for those rows."""
     if isinstance(fits, Grid):
         return fits.comparison.copy()
     if isinstance(fits, Fit):
@@ -895,8 +1096,8 @@ def compare_models(fits, wave=None, role=None, min_proportion=None, min_expected
     for i, fit in enumerate(fits):
         result = fit.result
         reliable, blocked, warned = _reliability(result)
-        membership = np.asarray(result.get("expected_membership") or [], dtype=float)
-        transitions = np.asarray(result.get("expected_transitions") or [], dtype=float)
+        membership = np.asarray(_values(result.get("expected_membership")), dtype=float)
+        transitions = np.asarray(_values(result.get("expected_transitions")), dtype=float)
         min_n = float(membership.min()) if membership.size else np.nan
         min_p = min_n / result["n_analyzed"] if membership.size and result["n_analyzed"] else np.nan
         small_flag, small_rule = _small_state(min_n, min_p, min_proportion, min_expected_n)
@@ -1026,6 +1227,7 @@ def _records(frame: pd.DataFrame) -> list:
 
 
 def save_model(obj, path) -> str:
+    """Write a selection, grid, or comparison table and return the path."""
     if isinstance(obj, Selection):
         payload = {
             "format_version": 1,
@@ -1060,6 +1262,7 @@ def save_model(obj, path) -> str:
 
 
 def load_model(path):
+    """Read an archive written by ``save_model``."""
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     if payload.get("format_version") != 1 or payload.get("package") != "pyfylr":
@@ -1146,6 +1349,8 @@ def _fit_state_grid(data, indicators, id, wave, n_states, covariance, family, lo
 
 @dataclass
 class Selection:
+    """An analyst's recorded choice, not the automatic selection."""
+
     chosen: dict
     rationale: str
     timestamp: str
@@ -1164,6 +1369,8 @@ class Selection:
 
 @dataclass
 class Grid:
+    """Fits from one grid and the comparison table of those fits."""
+
     fits: list
     comparison: pd.DataFrame
 
@@ -1173,6 +1380,8 @@ class Grid:
 
 @dataclass
 class WaveEnumeration:
+    """Per-wave diagnostic tables. They do not choose the joint state count."""
+
     tables: dict
     fits: list
     note: str
@@ -1186,6 +1395,7 @@ _WAVE_NOTE = (
 
 def fit_grid(data, indicators, id=None, wave=None, n_states=range(1, 4),
              covariance=("EEI", "VVI", "EEE", "VVV"), model="detect", by_wave=False, family=None, **kwargs):
+    """Fit a grid of state counts and return a ``Grid``."""
     if model not in ("detect", "lpa", "lca", "lta"):
         raise ValueError("model must be 'detect', 'lpa', 'lca', or 'lta'")
     states = [int(k) for k in n_states]
@@ -1226,6 +1436,7 @@ def enumerate_waves(data, indicators, id, wave, **kwargs) -> WaveEnumeration:
 
 
 def plot_fit_criteria(comparison, ax=None):
+    """Plot information criteria. This is a description, not a test."""
     import matplotlib.pyplot as plt
 
     frame = comparison.comparison.copy() if isinstance(comparison, Grid) else comparison.copy()
@@ -1257,27 +1468,51 @@ def plot_fit_criteria(comparison, ax=None):
 
 
 def compare_invariance(restricted: Fit, unrestricted: Fit) -> dict:
+    """Likelihood-ratio comparison of one measurement restriction."""
     return dict(_core.compare_invariance(restricted.panel, restricted.result, unrestricted.result))
 
 
 def compare_transitions(equal_fit: Fit, free_fit: Fit) -> dict:
+    """Likelihood-ratio comparison of equal and free transitions."""
     return dict(_core.compare_transitions(equal_fit.panel, equal_fit.result, free_fit.result))
 
 
 def decode_states(fit: Fit, method="smoothed") -> pd.DataFrame:
-    aug = fit.augment()
-    if method == "smoothed":
+    """Decoded states. ``method`` is smoothed, filtered, or viterbi."""
+    if method not in ("smoothed", "filtered", "viterbi"):
+        raise ValueError("method must be 'smoothed', 'filtered', or 'viterbi'")
+    # A stored fit, and a streaming fit that computed posteriors, keep the
+    # historical column subset of augment(). An excluded subject stays None.
+    if fit.result.get("posteriors_computed") is not False:
+        aug = fit.augment()
+        if method == "viterbi":
+            return aug[["id", "wave", "viterbi_state"]]
+        if method == "filtered":
+            keep = [c for c in aug.columns if not c.startswith("smoothed_")]
+            return aug[keep]
         return aug
-    if method == "filtered":
-        keep = [c for c in aug.columns if not c.startswith("smoothed_")]
-        return aug[keep]
-    if method == "viterbi":
-        return aug[["id", "wave", "viterbi_state"]]
-    raise ValueError("method must be 'smoothed', 'filtered', or 'viterbi'")
+    if method != "viterbi":
+        raise ValueError("posteriors were not computed; refit with posteriors=True")
+    result = fit.result
+    width = int(result["n_waves"])
+    rows = []
+    for i, subject in enumerate(fit.panel["ids"]):
+        for t, wave in enumerate(fit.panel["waves"]):
+            code = result["viterbi"][i * width + t]
+            rows.append({
+                "id": subject,
+                "wave": wave,
+                "viterbi_state": None if code < 0 else int(code) + 1,
+            })
+    return pd.DataFrame(rows)
 
 
 def estimate_distal(name, family, timing=None, wave=None, from_state=None, to_state=None, method=None):
-    """Distal outcomes are Release 3. This call validates the declaration and stops."""
+    """Validate a distal request and then raise.
+
+    ``family`` is required. Distal outcomes are not estimated in Release 1,
+    so this function does not return a result.
+    """
     _core.estimate_distal({
         "name": name,
         "family": family,
@@ -1290,6 +1525,7 @@ def estimate_distal(name, family, timing=None, wave=None, from_state=None, to_st
 
 
 def plot_profiles(fit: Fit, ax=None):
+    """Plot class means or response probabilities."""
     import matplotlib.pyplot as plt
     import seaborn as sns
 
@@ -1312,6 +1548,7 @@ def plot_profiles(fit: Fit, ax=None):
 
 
 def plot_transitions(fit: Fit, ax=None):
+    """Plot the fitted transition probabilities."""
     import matplotlib.pyplot as plt
     import seaborn as sns
 
@@ -1345,7 +1582,7 @@ def add_starts(fit: Fit, n_new, seed=1) -> Fit:
     spec = dict(fit.spec)
     spec["has_start"] = False
     raw = dict(_core.add_starts(fit.panel, spec, fit.result, int(n_new), float(seed)))
-    return _same_fit(raw, fit)
+    return _same_fit(match_result_form(raw, fit.result), fit)
 
 
 def align_states(fit: Fit, reference):
@@ -1358,7 +1595,8 @@ def align_states(fit: Fit, reference):
     """
     params = reference.result["params"] if isinstance(reference, Fit) else reference
     out = _core.align_states(fit.panel, fit.spec, fit.result, params)
-    aligned = _same_fit(dict(out["result"]), fit)
+    raw = match_result_form(dict(out["result"]), fit.result)
+    aligned = _same_fit(raw, fit)
     return aligned, dict(out["alignment"])
 
 
@@ -1380,12 +1618,13 @@ def posterior_states(fit: Fit, kind="smoothed") -> pd.DataFrame:
 def posterior_transitions(fit: Fit) -> pd.DataFrame:
     """Adjacent-state joint probabilities (xi), one row per subject, interval, and pair."""
     result = fit.result
+    _require_posteriors(result)
     k = int(result["K"])
     n = int(result["n_subjects"])
     t = int(result["n_waves"])
-    xi = result.get("xi") or []
+    xi = _values(result.get("xi"))
     columns = ["id", "from_wave", "from_state", "to_state", "probability"]
-    if t < 2 or not xi:
+    if t < 2 or len(xi) == 0:
         return pd.DataFrame(columns=columns)
     rows = []
     for i, subject in enumerate(fit.panel["ids"]):
@@ -1415,6 +1654,8 @@ def state_prevalence(fit: Fit, kind="model") -> pd.DataFrame:
     key = {"model": "prevalence_model", "posterior": "prevalence_posterior", "hard": "prevalence_hard"}.get(kind)
     if key is None:
         raise ValueError("kind must be 'model', 'posterior', or 'hard'")
+    if kind != "model":
+        _require_posteriors(fit.result)
     values = list(fit.result[key])
     k = int(fit.result["K"])
     rows = []
@@ -1433,6 +1674,7 @@ def state_prevalence(fit: Fit, kind="model") -> pd.DataFrame:
 def expected_counts(fit: Fit) -> pd.DataFrame:
     """Expected state counts by wave and expected transition counts on each interval."""
     result = fit.result
+    _require_posteriors(result)
     k = int(result["K"])
     membership = list(result["expected_membership"])
     rows = []
@@ -1446,7 +1688,7 @@ def expected_counts(fit: Fit) -> pd.DataFrame:
                 "to_state": np.nan,
                 "count": membership[t * k + state],
             })
-    transitions = list(result.get("expected_transitions") or [])
+    transitions = list(_values(result.get("expected_transitions")))
     intervals = len(transitions) // (k * k) if k else 0
     for t in range(intervals):
         for a in range(k):
@@ -1462,6 +1704,7 @@ def expected_counts(fit: Fit) -> pd.DataFrame:
 
 
 def plot_missingness(data, indicators, id, wave=None, family=None, ax=None):
+    """Bar chart of wave-missingness patterns."""
     import matplotlib.pyplot as plt
 
     summary = describe_missingness(data, indicators, id, wave, family)

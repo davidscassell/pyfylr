@@ -9,12 +9,22 @@
 #include <vector>
 
 // Shared numerical core for profylr and pyfylr.
-// Eigen is used with EIGEN_DONT_PARALLELIZE. Concurrency is a std::thread
-// pool over random starts and over bootstrap draws. Workers do not call
-// back into R or Python. The M-step reduction stays on the calling thread
-// of each start, and the E-step is not split across subjects.
+// Eigen is used with EIGEN_DONT_PARALLELIZE. Concurrency is std::thread.
+// A pool runs random starts and bootstrap draws. When estep_threads > 1 and
+// the caller is not already inside that pool, the E-step also runs fixed
+// subject blocks on std::thread and reduces them on the calling thread.
+// A start or BLRT worker forces that E-step back to one thread. Workers do
+// not call back into R or Python.
 
 namespace lta {
+
+// The fitter's replication test: std::abs(ll - best) <= replicate_tol.
+inline bool logliks_replicate(double ll, double best, double replicate_tol) {
+    if (!std::isfinite(ll) || !std::isfinite(best) || !std::isfinite(replicate_tol) || replicate_tol < 0.0)
+        return false;
+    return std::abs(ll - best) <= replicate_tol;
+}
+
 
 // Bootstrap draws still use this absolute gap. An alternative this far
 // below the null is not a successful draw. EM monotonicity does not use it;
@@ -33,7 +43,7 @@ constexpr double kEmDecreaseRel = 1e-8;
 
 // Two class weights closer than this are a tie in canonical label order.
 // 1e-8 is coarser than a double ulp of a probability and finer than the
-// 1e-3 replicate tolerance, so rounding cannot swap two nearly equal
+// replication tolerance, so rounding cannot swap two nearly equal
 // weights while a real difference still orders them. The tie breaks on the
 // first indicator's mean, or on its last category probability.
 // Weights joined by a chain of pairs inside this tolerance are one component,
@@ -138,6 +148,11 @@ inline bool normalize_log_weights(const double* log_w, int n, double* out) {
 }
 
 enum Measurement { MEAS_CATEGORICAL = 0, MEAS_GAUSSIAN = 1, MEAS_MIXED = 2 };
+// Stored keeps the dense posterior for every E-step. Streaming accumulates
+// categorical sufficient statistics one subject at a time and does not keep
+// gamma, filtered, or xi during EM. Gaussian and mixed models have no
+// streaming M-step yet.
+enum EStep { ESTEP_STORED = 0, ESTEP_STREAMING = 1 };
 // Per-indicator families. Ordinal is Release 2. Count families are later.
 // Bernoulli and nominal are locally independent given the state. Every
 // Gaussian indicator belongs to one block with the requested covariance.
@@ -380,6 +395,12 @@ inline bool blrt_split_null_state(const Params& src, int k0, int k1, const NullS
     return true;
 }
 
+// Within-fit E-step workers. 1024 is below every 32-bit INT_MAX, so an
+// accepted value cannot become NA when R stores it as an integer.
+constexpr int kMaxEstepThreads = 1024;
+constexpr int PATTERNS_NONE = 0;
+constexpr int PATTERNS_COMPRESS = 1;
+
 struct Spec {
     int K = 2;
     int cov_model = COV_VVV;
@@ -397,7 +418,9 @@ struct Spec {
     // smaller drop is kept, and it is converged when the relative change is
     // below `tol`.
     double tol = 1e-7;
-    double replicate_tol = 1e-3;
+    // Same solution when std::abs(ll - best) <= replicate_tol.
+    // The default 0.1 is documented in docs/spec.md. A caller can set it.
+    double replicate_tol = 0.1;
     int n_threads = 1;
     std::uint64_t seed = 1;
     bool align_labels = true;
@@ -414,6 +437,21 @@ struct Spec {
     // entirely random, and variant = offset + local id, so pattern, partial,
     // and tail slots do not repeat the earlier fit.
     int start_variant_offset = 0;
+    // "stored" is the historical E-step. "streaming" is categorical only.
+    int estep = ESTEP_STORED;
+    // When estep is streaming, a true value runs one posterior pass after
+    // convergence. The stored E-step always returns posteriors; this flag
+    // does not change that path.
+    bool posteriors = true;
+    // 1 keeps the historical subject loop. Values above 1, and at most
+    // kMaxEstepThreads, cut the analyzed subjects into fixed blocks and
+    // reduce those blocks in block order. The block size does not depend
+    // on this count.
+    int estep_threads = 1;
+    // "none" keeps one forward-backward per analyzed subject. "compress"
+    // collapses identical categorical response patterns. Appended last so a
+    // default spec does not change the fields above.
+    int patterns = PATTERNS_NONE;
 };
 
 struct FitResult {
@@ -557,6 +595,15 @@ struct FitResult {
     std::string parameter_uncertainty = "none";
     std::string state_uncertainty = "plugin_posterior";
     std::string interval_type = "none";
+    // Trailing so a stored fit does not change the layout of the fields above.
+    // Exported only when estep is streaming. A stored fit leaves both at the
+    // defaults and does not consult them.
+    bool posteriors_computed = true;
+    int estep = ESTEP_STORED;
+    // Exported only when patterns is compress. Empty and zero on a default fit.
+    int patterns = PATTERNS_NONE;
+    int n_patterns = 0;
+    std::vector<int> pattern_id;
 };
 
 struct BuildInfo {
@@ -1049,19 +1096,24 @@ struct WorkerLoad {
     double busy_seconds = 0;
 };
 
-// Fit every draw. Seeds are `base + 1000 * draw + retry` and
-// `base + 200000 + 1000 * draw + retry`, with `draw` 1-based, so a draw does
-// not depend on which thread runs it or on how many threads were asked for.
-// Each fit uses one thread. `n_threads` is the number of draws in flight.
-// Values above the hardware cap are clamped. `n_threads == 1` does not spawn
-// threads. One persistent pool pulls draw indices from an atomic counter.
-// `interrupt`, when set, runs on the calling thread between waves of
-// completed draws and must not be called from a worker.
-// When `worker_loads` is non-null it is replaced with one entry per worker.
+// Fit every supplied draw. Seeds are `base + 1000 * draw + retry` and
+// `base + 200000 + 1000 * draw + retry`. `draw` is 1-based. An empty
+// `draw_ids` uses the position in `jobs` plus one, which is the historical
+// call with every draw in one vector. A non-empty `draw_ids` is the stable
+// global id of each job, so a batch keeps the same seeds as that full vector.
+// A draw does not depend on which thread runs it, how many threads were
+// asked for, or which other draws are in the vector. Each fit uses one
+// thread. `n_threads` is the number of draws in flight. Values above the
+// hardware cap are clamped. `n_threads == 1` does not spawn threads. One
+// persistent pool pulls draw indices from an atomic counter. `interrupt`,
+// when set, runs on the calling thread between waves of completed draws and
+// must not be called from a worker. When `worker_loads` is non-null it is
+// replaced with one entry per worker.
 std::vector<BlrtDrawFit> blrt_fit_draws(const std::vector<BlrtDrawJob>& jobs, const Spec& h0,
                                         const Spec& h1, std::uint64_t base, int max_retries,
                                         int n_threads, void (*interrupt)() = nullptr,
-                                        std::vector<WorkerLoad>* worker_loads = nullptr);
+                                        std::vector<WorkerLoad>* worker_loads = nullptr,
+                                        const std::vector<int>& draw_ids = {});
 
 }  // namespace lta
 

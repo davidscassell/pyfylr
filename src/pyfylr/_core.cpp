@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <limits>
@@ -94,7 +95,7 @@ lta::Spec spec_from(const py::dict& d) {
     s.n_full = d.contains("n_full") ? d["n_full"].cast<int>() : 4;
     s.max_iter = d.contains("max_iter") ? d["max_iter"].cast<int>() : 200;
     s.tol = d.contains("tol") ? d["tol"].cast<double>() : 1e-7;
-    s.replicate_tol = d.contains("replicate_tol") ? d["replicate_tol"].cast<double>() : 1e-3;
+    s.replicate_tol = d.contains("replicate_tol") ? d["replicate_tol"].cast<double>() : 0.1;
     s.n_threads = d.contains("n_threads") ? d["n_threads"].cast<int>() : 1;
     s.seed = d.contains("seed") ? d["seed"].cast<std::uint64_t>() : 1;
     s.align_labels = d.contains("align_labels") ? d["align_labels"].cast<bool>() : true;
@@ -110,6 +111,44 @@ lta::Spec spec_from(const py::dict& d) {
         if (st.contains("means") && !st["means"].is_none()) s.start.means = st["means"].cast<std::vector<double>>();
         if (st.contains("cov") && !st["cov"].is_none()) s.start.cov = st["cov"].cast<std::vector<double>>();
     }
+    if (d.contains("estep") && !d["estep"].is_none()) {
+        const std::string estep = d["estep"].cast<std::string>();
+        if (estep == "stored") s.estep = lta::ESTEP_STORED;
+        else if (estep == "streaming") s.estep = lta::ESTEP_STREAMING;
+        else throw std::invalid_argument("estep must be \"stored\" or \"streaming\"");
+    }
+    if (d.contains("posteriors") && !d["posteriors"].is_none())
+        s.posteriors = d["posteriors"].cast<bool>();
+    if (d.contains("estep_threads") && !d["estep_threads"].is_none()) {
+        const py::object raw = d["estep_threads"];
+        const char* message = "estep_threads must be a finite whole number from 1 to 1024";
+        if (py::isinstance<py::bool_>(raw)) throw std::invalid_argument(message);
+        long long threads = 0;
+        if (py::isinstance<py::float_>(raw)) {
+            const double value = raw.cast<double>();
+            if (!std::isfinite(value) || std::trunc(value) != value || value < 1.0 ||
+                value > static_cast<double>(lta::kMaxEstepThreads))
+                throw std::invalid_argument(message);
+            threads = static_cast<long long>(value);
+        } else {
+            try {
+                threads = raw.cast<long long>();
+            } catch (const std::exception&) {
+                throw std::invalid_argument(message);
+            }
+            if (threads < 1 || threads > lta::kMaxEstepThreads) throw std::invalid_argument(message);
+        }
+        s.estep_threads = static_cast<int>(threads);
+    }
+    if (d.contains("patterns") && !d["patterns"].is_none()) {
+        const py::object raw = d["patterns"];
+        if (!py::isinstance<py::str>(raw))
+            throw std::invalid_argument("patterns must be \"none\" or \"compress\"");
+        const std::string patterns = raw.cast<std::string>();
+        if (patterns == "none") s.patterns = lta::PATTERNS_NONE;
+        else if (patterns == "compress") s.patterns = lta::PATTERNS_COMPRESS;
+        else throw std::invalid_argument("patterns must be \"none\" or \"compress\"");
+    }
     if (d.contains("covariates") && !d["covariates"].is_none()) {
         lta::CovariateSpec c;
         auto names = d["covariates"].cast<std::vector<std::string>>();
@@ -120,13 +159,21 @@ lta::Spec spec_from(const py::dict& d) {
     return s;
 }
 
+py::array_t<double> as_f64(const std::vector<double>& values) {
+    py::array_t<double> out(static_cast<py::ssize_t>(values.size()));
+    if (!values.empty()) {
+        std::memcpy(out.mutable_data(), values.data(), values.size() * sizeof(double));
+    }
+    return out;
+}
+
 py::dict params_to(const lta::Params& p) {
     py::dict d;
-    d["delta"] = p.delta;
-    d["tau"] = p.tau;
-    d["rho"] = p.rho;
-    d["means"] = p.means;
-    d["cov"] = p.cov;
+    d["delta"] = as_f64(p.delta);
+    d["tau"] = as_f64(p.tau);
+    d["rho"] = as_f64(p.rho);
+    d["means"] = as_f64(p.means);
+    d["cov"] = as_f64(p.cov);
     return d;
 }
 
@@ -140,6 +187,13 @@ py::dict fit_to(const lta::FitResult& r) {
     d["converged"] = r.converged;
     d["regularized"] = r.regularized;
     d["ic_supported"] = r.ic_supported;
+    if (r.estep == lta::ESTEP_STREAMING)
+        d["posteriors_computed"] = r.posteriors_computed;
+    if (r.patterns == lta::PATTERNS_COMPRESS) {
+        d["patterns"] = "compress";
+        d["n_patterns"] = r.n_patterns;
+        d["pattern_id"] = r.pattern_id;
+    }
     d["n_iter"] = r.n_iter;
     d["n_starts"] = r.n_starts;
     d["n_full"] = r.n_full;
@@ -200,28 +254,28 @@ py::dict fit_to(const lta::FitResult& r) {
     d["means_invariant"] = r.means_invariant;
     d["covariance_invariant"] = r.covariance_invariant;
     d["transition_equal"] = r.transition_equal;
-    d["gamma"] = r.gamma;
-    d["filtered"] = r.filtered;
-    d["xi"] = r.xi;
+    d["gamma"] = as_f64(r.gamma);
+    d["filtered"] = as_f64(r.filtered);
+    d["xi"] = as_f64(r.xi);
     d["viterbi"] = r.viterbi;
     d["modal"] = r.modal;
     d["label_order"] = r.label_order;
-    d["prevalence_model"] = r.prevalence_model;
-    d["prevalence_posterior"] = r.prevalence_posterior;
-    d["prevalence_hard"] = r.prevalence_hard;
-    d["expected_membership"] = r.expected_membership;
-    d["expected_transitions"] = r.expected_transitions;
-    d["hard_transitions"] = r.hard_transitions;
+    d["prevalence_model"] = as_f64(r.prevalence_model);
+    d["prevalence_posterior"] = as_f64(r.prevalence_posterior);
+    d["prevalence_hard"] = as_f64(r.prevalence_hard);
+    d["expected_membership"] = as_f64(r.expected_membership);
+    d["expected_transitions"] = as_f64(r.expected_transitions);
+    d["hard_transitions"] = as_f64(r.hard_transitions);
     d["start_id"] = r.start_id;
     d["start_phase"] = r.start_phase;
-    d["start_loglik"] = r.start_loglik;
+    d["start_loglik"] = as_f64(r.start_loglik);
     d["start_iters"] = r.start_iters;
     d["start_converged"] = r.start_converged;
     d["start_selected"] = r.start_selected;
     d["start_admissible"] = r.start_admissible;
     d["admissible"] = r.admissible;
     d["rejected_start"] = r.rejected_start;
-    d["rejected_loglik"] = r.rejected_loglik;
+    d["rejected_loglik"] = as_f64(r.rejected_loglik);
     d["rejected_n"] = r.rejected_n;
     d["rejected_level"] = r.rejected_level;
     d["rejected_reason"] = r.rejected_reason;
@@ -283,6 +337,10 @@ lta::FitResult fit_from(const py::dict& d) {
     r.covariance_name = d["covariance"].cast<std::string>();
     if (!r.covariance_name.empty()) r.cov_model = lta::parse_covariance_name(r.covariance_name);
     r.ic_supported = d["ic_supported"].cast<bool>();
+    if (d.contains("posteriors_computed") && !d["posteriors_computed"].is_none()) {
+        r.posteriors_computed = d["posteriors_computed"].cast<bool>();
+        r.estep = lta::ESTEP_STREAMING;
+    }
     auto p = d["params"].cast<py::dict>();
     r.params.delta = p["delta"].cast<std::vector<double>>();
     r.params.tau = p["tau"].cast<std::vector<double>>();
@@ -500,12 +558,15 @@ PYBIND11_MODULE(_core, m) {
         return d;
     });
 
+    m.def("logliks_replicate", [](double ll, double best, double replicate_tol) {
+        return lta::logliks_replicate(ll, best, replicate_tol);
+    }, py::arg("ll"), py::arg("best"), py::arg("replicate_tol") = 0.1);
     m.def("fit", [](py::dict panel, py::dict spec) {
         return fit_to(lta::fit(panel_from(panel), spec_from(spec), nullptr));
     });
     m.def("blrt_hardware_threads", []() { return lta::blrt_hardware_threads(); });
     m.def("blrt_fit_draws", [](py::list panels, std::vector<int> present, py::dict h0, py::dict h1,
-                              std::uint64_t base, int max_retries, int n_threads) {
+                              std::uint64_t base, int max_retries, int n_threads, std::vector<int> draw_ids) {
         if (static_cast<int>(panels.size()) != static_cast<int>(present.size()))
             throw std::invalid_argument("panels and present must have the same length");
         const auto convert_t0 = std::chrono::steady_clock::now();
@@ -525,7 +586,7 @@ PYBIND11_MODULE(_core, m) {
         const auto engine_t0 = std::chrono::steady_clock::now();
         {
             py::gil_scoped_release release;
-            rows = lta::blrt_fit_draws(jobs, spec0, spec1, base, max_retries, n_threads, nullptr, &loads);
+            rows = lta::blrt_fit_draws(jobs, spec0, spec1, base, max_retries, n_threads, nullptr, &loads, draw_ids);
         }
         const double engine_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - engine_t0).count();
@@ -579,7 +640,8 @@ PYBIND11_MODULE(_core, m) {
         out["seconds_export"] =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - export_t0).count();
         return out;
-    });
+    }, py::arg("panels"), py::arg("present"), py::arg("h0"), py::arg("h1"), py::arg("base"),
+       py::arg("max_retries"), py::arg("n_threads"), py::arg("draw_ids") = std::vector<int>{});
     m.def("split_null_state", [](py::dict params, int k0, int k1, const std::string& covariance, int n_tau,
                                  int n_meas, int n_mean, int n_cov, int n_gaussian, int J, int Rmax) {
         lta::Params src;

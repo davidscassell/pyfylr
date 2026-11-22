@@ -412,8 +412,8 @@ def test_blrt_prints_its_cost_and_stays_unvalidated(capsys):
         assert out["p_ci_low"] <= out["p"] <= out["p_ci_high"]
         assert out["p_ci_method"] == "wilson_95"
     assert "Dropped" in out["reason"]
-    assert "Mplus TECH14 p=b/B" in out["reason"]
-    assert "(b+1)/(B+1)" in out["reason"]
+    assert "Mplus TECH14 p=b/n_ok" in out["reason"]
+    assert "(b+1)/(n_ok+1)" in out["reason"]
     assert "p_plus" in out["reason"]
     assert "secondary" in out["reason"]
     assert "p_mplus" not in out
@@ -876,7 +876,7 @@ def _read_tech14(name):
 def test_tech14_fixtures_match_the_likelihood_ratio_and_the_p_value_within_monte_carlo_error():
     assert pf.lpa_spec(2)["max_iter"] == 200
     assert pf.selection_rule()["blrt"] is False
-    # Guard that p is b/B. Independent runs are not required to match. 0.06 is wider
+    # Guard that p is b/n_ok. Independent runs are not required to match. 0.06 is wider
     # than one Monte Carlo SE at B=100 and rejects a different statistic.
     tolerance = 0.06
     controls = dict(
@@ -918,8 +918,8 @@ def test_tech14_fixtures_match_the_likelihood_ratio_and_the_p_value_within_monte
         assert "p_mplus" not in out
         assert f"Dropped {out['n_failed']} draws" in out["reason"]
         assert f"{out['n_not_replicated']} kept draws did not replicate" in out["reason"]
-        assert "Mplus TECH14 p=b/B" in out["reason"]
-        assert "p_plus=(b+1)/(B+1)" in out["reason"]
+        assert "Mplus TECH14 p=b/n_ok" in out["reason"]
+        assert "p_plus=(b+1)/(n_ok+1)" in out["reason"]
         assert out["p"] == pytest.approx(out["b"] / out["n_ok"])
         assert out["p_plus"] == pytest.approx((out["b"] + 1) / (out["n_ok"] + 1))
         assert abs(out["p"] - printed["p"]) <= tolerance

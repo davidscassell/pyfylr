@@ -18,6 +18,9 @@ not wrap the estimators in ``GridSearchCV``.
   nested mixture and must not be used to select ``n_states``.
 """
 
+import subprocess
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -215,6 +218,125 @@ def test_add_starts_keeps_the_same_core_and_grows_the_start_list():
     assert more.result["loglik"] + 1e-8 >= fit.result["loglik"]
 
 
+# Frozen before the single run of this commit. Command, from the repo root:
+#   python3.12 -m pytest \
+#     pyfylr/tests/test_sklearn_api.py::test_wide_dataframe_schema_accepts_the_training_column_order \
+#     pyfylr/tests/test_sklearn_api.py::test_wide_dataframe_later_wave_rename_and_swap_are_rejected \
+#     pyfylr/tests/test_sklearn_api.py::test_numpy_wide_input_stays_positional \
+#     pyfylr/tests/test_sklearn_api.py::test_long_dataframe_column_order_is_not_the_wide_schema \
+#     pyfylr/tests/test_sklearn_api.py::test_transition_predict_uses_smoothing_and_keeps_the_other_paths \
+#     pyfylr/tests/test_sklearn_api.py::test_latent_class_model_matches_pandas_on_codes \
+#     pyfylr/tests/test_panel_schema.py \
+#     -q --tb=short
+# Tolerances for the new comparisons: predict, filter, and viterbi use
+# np.array_equal. predict_proba and score_samples use np.array_equal.
+# score uses ==. No loosened float tolerance. Existing tests keep their
+# own assertions, including pytest.approx where they already had it.
+_WIDE_FAST = dict(
+    n_states=2, n_starts=1, screen_iter=0, n_full=1, max_iter=12,
+    tol=1e-7, random_state=1,
+)
+
+
+def _wide_gaussian(n=24, seed=7):
+    rng = np.random.default_rng(seed)
+    values = rng.normal(size=(n, 4))
+    values[: n // 2, 0] -= 1.0
+    values[n // 2 :, 0] += 1.0
+    values[: n // 2, 2] -= 1.0
+    values[n // 2 :, 2] += 1.0
+    return pd.DataFrame(values, columns=["w1_y1", "w1_y2", "w2_y1", "w2_y2"])
+
+
+def _wide_codes(n=24):
+    return pd.DataFrame({
+        "w1_u": [0, 1] * (n // 2),
+        "w1_v": [0, 0, 1, 1] * (n // 4),
+        "w2_u": [0, 1] * (n // 2),
+        "w2_v": [1, 1, 0, 0] * (n // 4),
+    })
+
+
+def _evaluation(model, data):
+    return {
+        "predict": np.asarray(model.predict(data)),
+        "proba": np.asarray(model.predict_proba(data)),
+        "samples": np.asarray(model.score_samples(data)),
+        "score": model.score(data),
+        "filter": np.asarray(model.filter(data)),
+        "viterbi": np.asarray(model.viterbi(data)),
+    }
+
+
+def _assert_exact_evaluation(left, right):
+    assert np.array_equal(left["predict"], right["predict"])
+    assert np.array_equal(left["filter"], right["filter"])
+    assert np.array_equal(left["viterbi"], right["viterbi"])
+    assert np.array_equal(left["proba"], right["proba"])
+    assert np.array_equal(left["samples"], right["samples"])
+    assert left["score"] == right["score"]
+
+
+def test_wide_dataframe_schema_accepts_the_training_column_order():
+    gaussian = _wide_gaussian()
+    transition = pf.LatentTransitionModel(covariance="EEI", n_waves=2, **_WIDE_FAST).fit(gaussian)
+    same = gaussian.copy()
+    _assert_exact_evaluation(_evaluation(transition, gaussian), _evaluation(transition, same))
+    assert list(transition.feature_names_in_) == list(gaussian.columns)
+    codes = _wide_codes()
+    classes = pf.LatentClassModel(n_waves=2, **_WIDE_FAST).fit(codes)
+    _assert_exact_evaluation(_evaluation(classes, codes), _evaluation(classes, codes.copy()))
+    assert list(classes.feature_names_in_) == list(codes.columns)
+
+
+def test_wide_dataframe_later_wave_rename_and_swap_are_rejected():
+    gaussian = _wide_gaussian()
+    transition = pf.LatentTransitionModel(covariance="EEI", n_waves=2, **_WIDE_FAST).fit(gaussian)
+    renamed = gaussian.rename(columns={"w2_y1": "later_y1"})
+    swapped = gaussian[["w1_y1", "w1_y2", "w2_y2", "w2_y1"]]
+    for bad in (renamed, swapped):
+        with pytest.raises(ValueError, match="ordered schema"):
+            transition.predict(bad)
+        with pytest.raises(ValueError, match="ordered schema"):
+            transition.score(bad)
+    codes = _wide_codes()
+    classes = pf.LatentClassModel(n_waves=2, **_WIDE_FAST).fit(codes)
+    renamed_codes = codes.rename(columns={"w2_u": "later_u"})
+    swapped_codes = codes[["w1_u", "w1_v", "w2_v", "w2_u"]]
+    for bad in (renamed_codes, swapped_codes):
+        with pytest.raises(ValueError, match="ordered schema"):
+            classes.predict(bad)
+        with pytest.raises(ValueError, match="ordered schema"):
+            classes.score(bad)
+
+
+def test_numpy_wide_input_stays_positional():
+    gaussian = _wide_gaussian()
+    transition = pf.LatentTransitionModel(covariance="EEI", n_waves=2, **_WIDE_FAST).fit(gaussian)
+    array = gaussian.to_numpy(dtype=float)
+    _assert_exact_evaluation(_evaluation(transition, gaussian), _evaluation(transition, array))
+    from_array = pf.LatentTransitionModel(covariance="EEI", n_waves=2, **_WIDE_FAST).fit(array)
+    assert not hasattr(from_array, "feature_names_in_")
+    renamed = gaussian.rename(columns={"w2_y1": "later_y1"})
+    _assert_exact_evaluation(_evaluation(from_array, array), _evaluation(from_array, renamed))
+
+
+def test_long_dataframe_column_order_is_not_the_wide_schema():
+    rng = np.random.default_rng(7)
+    n = 24
+    y = np.concatenate([rng.normal(-1.0, 0.3, n), rng.normal(1.0, 0.3, n)])
+    long = pd.DataFrame({
+        "id": list(range(n)) * 2,
+        "wave": [1] * n + [2] * n,
+        "y": y,
+    })
+    model = pf.LatentTransitionModel(
+        covariance="EEI", n_waves=2, id_column="id", wave_column="wave", **_WIDE_FAST,
+    ).fit(long)
+    reordered = long[["y", "wave", "id"]]
+    _assert_exact_evaluation(_evaluation(model, long), _evaluation(model, reordered))
+
+
 def test_latent_class_model_matches_pandas_on_codes():
     data = pd.DataFrame({"u": [0, 1] * 30, "v": [0, 0, 1, 1] * 15})
     pandas_fit = pf.fit_lca(data, ["u", "v"], n_states=2, n_starts=2, max_iter=25, screen_iter=5, n_full=2, seed=1)
@@ -263,20 +385,234 @@ def _check_name(check):
     return getattr(func, "__name__", str(check))
 
 
-try:
+_CHECK_FAST = dict(
+    n_states=1, covariance="EEI", n_starts=1, max_iter=12, screen_iter=0, n_full=1, random_state=0,
+)
+
+
+def load_parametrize_with_checks():
+    """Return sklearn's check parametrizer, or None when sklearn itself is absent.
+
+    Only ``ModuleNotFoundError`` whose missing name is the top-level package
+    ``sklearn`` is optional. An internal checker import, a transitive missing
+    module, or a missing ``parametrize_with_checks`` symbol is raised.
+    """
+    try:
+        import sklearn  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", None) == "sklearn":
+            return None
+        raise
     from sklearn.utils.estimator_checks import parametrize_with_checks
+    if not callable(parametrize_with_checks):
+        raise ImportError(
+            "sklearn.utils.estimator_checks.parametrize_with_checks is not available"
+        )
+    return parametrize_with_checks
 
-    _FAST = dict(n_states=1, covariance="EEI", n_starts=1, max_iter=12, screen_iter=0, n_full=1, random_state=0)
 
-    @parametrize_with_checks([
-        pf.LatentProfileModel(**_FAST),
-        pf.LatentTransitionModel(n_waves=1, **_FAST),
+def bind_estimator_checks(parametrize):
+    """Build the check decorator. Parametrization is not caught.
+
+    ``parametrize`` is None only after a confirmed top-level sklearn absence.
+    """
+    if parametrize is None:
+        return None
+    return parametrize([
+        pf.LatentProfileModel(**_CHECK_FAST),
+        pf.LatentTransitionModel(n_waves=1, **_CHECK_FAST),
     ])
+
+
+def _skip_when_sklearn_is_absent():
+    pytest.skip("scikit-learn is not installed; estimator checks were not collected")
+
+
+def _hide_sklearn_modules():
+    saved = {}
+    for key in list(sys.modules):
+        if key == "sklearn" or key.startswith("sklearn."):
+            saved[key] = sys.modules.pop(key)
+    return saved
+
+
+def _restore_modules(saved):
+    sys.modules.update(saved)
+
+
+def test_genuine_top_level_sklearn_absence_returns_none():
+    class _MissingSklearn:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == "sklearn":
+                raise ModuleNotFoundError("No module named 'sklearn'", name="sklearn")
+            return None
+
+    saved = _hide_sklearn_modules()
+    sys.meta_path.insert(0, _MissingSklearn())
+    try:
+        assert load_parametrize_with_checks() is None
+    finally:
+        sys.meta_path.pop(0)
+        _restore_modules(saved)
+
+
+def _install_parent_sklearn():
+    """A package object so ``import sklearn`` succeeds without the real install."""
+    import types
+    parent = types.ModuleType("sklearn")
+    parent.__path__ = []
+    utils = types.ModuleType("sklearn.utils")
+    utils.__path__ = []
+    sys.modules["sklearn"] = parent
+    sys.modules["sklearn.utils"] = utils
+    return parent, utils
+
+
+def _drop_installed_fixtures():
+    for key in list(sys.modules):
+        if key == "sklearn" or key.startswith("sklearn."):
+            sys.modules.pop(key, None)
+
+
+def test_internal_checker_import_error_propagates():
+    class _BrokenChecks:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == "sklearn.utils.estimator_checks":
+                raise ImportError("estimator checks failed internally")
+            return None
+
+    saved = _hide_sklearn_modules()
+    _install_parent_sklearn()
+    sys.meta_path.insert(0, _BrokenChecks())
+    try:
+        with pytest.raises(ImportError, match="estimator checks failed internally"):
+            load_parametrize_with_checks()
+    finally:
+        sys.meta_path.pop(0)
+        _drop_installed_fixtures()
+        _restore_modules(saved)
+
+
+def test_transitive_module_not_found_is_not_optional_sklearn():
+    class _MissingDependency:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == "sklearn":
+                raise ModuleNotFoundError("No module named 'notsklearn'", name="notsklearn")
+            return None
+
+    saved = _hide_sklearn_modules()
+    sys.meta_path.insert(0, _MissingDependency())
+    try:
+        with pytest.raises(ModuleNotFoundError, match="notsklearn") as raised:
+            load_parametrize_with_checks()
+        assert raised.value.name == "notsklearn"
+    finally:
+        sys.meta_path.pop(0)
+        _restore_modules(saved)
+
+
+def test_missing_checker_symbol_propagates():
+    import types
+    saved = _hide_sklearn_modules()
+    _install_parent_sklearn()
+    checks = types.ModuleType("sklearn.utils.estimator_checks")
+    sys.modules["sklearn.utils.estimator_checks"] = checks
+    try:
+        with pytest.raises(ImportError, match="parametrize_with_checks"):
+            load_parametrize_with_checks()
+    finally:
+        _drop_installed_fixtures()
+        _restore_modules(saved)
+
+
+def test_checker_parametrization_failure_propagates():
+    def boom(estimators):
+        raise TypeError("parametrization failed")
+
+    with pytest.raises(TypeError, match="parametrization failed"):
+        bind_estimator_checks(boom)
+
+
+def test_absent_sklearn_fallback_is_a_skip_not_a_pass():
+    with pytest.raises(pytest.skip.Exception, match="estimator checks were not collected"):
+        _skip_when_sklearn_is_absent()
+
+
+def test_installed_sklearn_exposes_the_checker():
+    parametrize = load_parametrize_with_checks()
+    if parametrize is None:
+        pytest.skip("scikit-learn is not installed; estimator checks were not collected")
+    assert callable(parametrize)
+
+
+def test_module_collection_without_sklearn_skips_checks():
+    """Collect the check item with top-level sklearn blocked in a subprocess.
+
+    The collected node is the explicit skip, not a parametrized checker and
+    not a test that passes because sklearn imports on a second try.
+    """
+    script = """
+import sys
+class _MissingSklearn:
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "sklearn":
+            raise ModuleNotFoundError("No module named 'sklearn'", name="sklearn")
+        return None
+sys.meta_path.insert(0, _MissingSklearn())
+for key in list(sys.modules):
+    if key == "sklearn" or key.startswith("sklearn."):
+        del sys.modules[key]
+import pytest
+raise SystemExit(pytest.main([
+    "--collect-only", "-q",
+    "pyfylr/tests/test_sklearn_api.py::test_check_estimator_where_it_applies",
+]))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(__import__("pathlib").Path(__file__).resolve().parents[2]),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+    nodes = [
+        line for line in output.splitlines()
+        if "test_check_estimator_where_it_applies" in line
+    ]
+    assert len(nodes) == 1, output
+    assert "[" not in nodes[0], output
+
+
+# Frozen validation plan, committed before the single execution.
+# Two phases, each once. No numeric tolerance.
+# Phase present, PYTHONPATH is an install of this SHA that includes scikit-learn:
+#   python3.12 -m pytest \
+#     pyfylr/tests/test_sklearn_api.py::test_genuine_top_level_sklearn_absence_returns_none \
+#     pyfylr/tests/test_sklearn_api.py::test_internal_checker_import_error_propagates \
+#     pyfylr/tests/test_sklearn_api.py::test_transitive_module_not_found_is_not_optional_sklearn \
+#     pyfylr/tests/test_sklearn_api.py::test_missing_checker_symbol_propagates \
+#     pyfylr/tests/test_sklearn_api.py::test_checker_parametrization_failure_propagates \
+#     pyfylr/tests/test_sklearn_api.py::test_absent_sklearn_fallback_is_a_skip_not_a_pass \
+#     pyfylr/tests/test_sklearn_api.py::test_installed_sklearn_exposes_the_checker \
+#     pyfylr/tests/test_sklearn_api.py::test_module_collection_without_sklearn_skips_checks \
+#     pyfylr/tests/test_sklearn_api.py::test_check_estimator_where_it_applies \
+#     -q --tb=short -ra
+# Phase absent, PYTHONPATH is an install of this SHA without scikit-learn.
+# First confirm import sklearn raises ModuleNotFoundError name sklearn.
+# Then the same pytest command, and one collect-only of this file.
+# Accepted skips there: the installed-sklearn test, and the unparametrized
+# estimator-check test ("estimator checks were not collected").
+# Checker skips in the present phase stay those in SKIPPED_CHECKS.
+_bound_checks = bind_estimator_checks(load_parametrize_with_checks())
+if _bound_checks is None:
+    def test_check_estimator_where_it_applies():
+        _skip_when_sklearn_is_absent()
+else:
+    @_bound_checks
     def test_check_estimator_where_it_applies(estimator, check):
         name = _check_name(check)
         if name in SKIPPED_CHECKS:
             pytest.skip(SKIPPED_CHECKS[name])
         check(estimator)
-except Exception:
-    def test_check_estimator_where_it_applies():
-        pytest.importorskip("sklearn")

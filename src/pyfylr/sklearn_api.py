@@ -14,6 +14,14 @@ State labels from :meth:`predict` are 0-based. The pandas API's
 ``modal_state`` is 1-based and refers to the same state. Probabilities and
 parameter values are not shifted.
 
+A wide DataFrame with ``n_waves > 1`` is wave-major, and the full ordered
+column list is the schema. Evaluation rejects a later-wave rename or a
+column swap even when the column count and the first-wave names still match.
+A NumPy array with the same column count stays positional: after a named fit
+its columns are read in that order and labeled with the fitted indicator
+names, and after an unnamed fit names are not consulted. A long DataFrame
+that names ``id_column`` and ``wave_column`` is not this wide-column schema.
+
 scikit-learn is optional. When it is installed the estimators inherit
 ``BaseEstimator``. When it is not, ``get_params`` and ``set_params`` follow
 the same constructor-signature convention, so :func:`clone` still works.
@@ -25,6 +33,12 @@ import inspect
 
 import numpy as np
 import pandas as pd
+
+
+def _values(value):
+    if value is None:
+        return []
+    return value
 
 SCORE_SELECTS_N_STATES = False
 
@@ -148,6 +162,45 @@ class _LatentEstimator(_Base):
             )
         return values, names
 
+    def _require_wide_dataframe_column_order(self, columns):
+        """Reject a wide DataFrame whose columns are not the fitted order.
+
+        NumPy has no names, so this is not called for an array. Call it only
+        for a wide DataFrame with ``n_waves > 1`` on evaluation, after the
+        column count has already been checked.
+        """
+        if not hasattr(self, "feature_names_in_"):
+            return
+        expected = list(self.feature_names_in_)
+        received = list(columns)
+        if received == expected:
+            return
+        raise ValueError(
+            "DataFrame columns are an ordered schema and do not match the fitted column order. "
+            f"{type(self).__name__} was fitted with columns {expected} and received {received}. "
+            "A later-wave rename or swap is a different layout. "
+            "A NumPy array with the same column count stays positional."
+        )
+
+    def _wide_names_for_evaluation(self, n_waves, dataframe_names):
+        """Indicator names for a wide layout on evaluation, not on fit.
+
+        A named fit stores every column. The first wave of those names is the
+        training indicator list. An array uses that list by position. A
+        DataFrame has already been required to match the full order, so its
+        own names are the same list. An unnamed fit has no column schema:
+        both an array and a DataFrame stay positional and get no names here.
+        """
+        if not hasattr(self, "feature_names_in_"):
+            return None
+        if dataframe_names is not None:
+            return list(dataframe_names)
+        full = list(self.feature_names_in_)
+        width = int(n_waves)
+        if width < 1 or len(full) % width != 0:
+            return None
+        return full[: len(full) // width]
+
     def fit(self, X, y=None):
         from pyfylr import fit_lca, fit_lpa, fit_lta
 
@@ -156,12 +209,12 @@ class _LatentEstimator(_Base):
         if self._model == "lpa":
             fit = fit_lpa(
                 frame, indicators, id=id_column, n_states=int(self.n_states),
-                covariance=self.covariance, family=self.family, **controls,
+                covariance=self.covariance, family=self.family, compact=False, **controls,
             )
         elif self._model == "lca":
             fit = fit_lca(
                 frame, indicators, id=id_column, wave=wave_column,
-                n_states=int(self.n_states), family=self.family, **controls,
+                n_states=int(self.n_states), family=self.family, compact=False, **controls,
             )
         else:
             fit = fit_lta(
@@ -171,7 +224,7 @@ class _LatentEstimator(_Base):
                 measurement_invariant=self.measurement_invariant,
                 means_invariant=self.means_invariant,
                 covariance_invariant=self.covariance_invariant,
-                **controls,
+                compact=False, **controls,
             )
         self.fit_result_ = fit
         self._assign_fitted(fit)
@@ -199,7 +252,7 @@ class _LatentEstimator(_Base):
             )
         }
         gaussian = int(result["n_gaussian"])
-        means = np.asarray(params["means"], dtype=float) if params["means"] else np.zeros((0,))
+        means = np.asarray(params["means"], dtype=float) if len(params["means"]) else np.zeros((0,))
         if gaussian and means.size:
             blocks = means.size // (k * gaussian)
             shaped = means.reshape(blocks, k, gaussian)
@@ -207,7 +260,7 @@ class _LatentEstimator(_Base):
         else:
             self.means_ = np.zeros((k, 0))
         self.covariances_ = _unpack_covariance(result)
-        tau = np.asarray(params["tau"], dtype=float) if params["tau"] else np.zeros((0,))
+        tau = np.asarray(params["tau"], dtype=float) if len(params["tau"]) else np.zeros((0,))
         if tau.size:
             blocks = tau.size // (k * k)
             shaped = tau.reshape(blocks, k, k)
@@ -229,7 +282,10 @@ class _LatentEstimator(_Base):
         spec["align_labels"] = False
         spec["has_start"] = False
         spec["n_starts"] = 1
-        return panel, dict(_core.evaluate(panel, spec, self.fit_result_.result["params"]))
+        raw = dict(_core.evaluate(panel, spec, self.fit_result_.result["params"]))
+        from pyfylr import match_result_form
+
+        return panel, match_result_form(raw, self.fit_result_.result)
 
     def _states(self, X, field):
         _panel, raw = self._evaluated(X)
@@ -353,7 +409,7 @@ class _LatentEstimator(_Base):
 
 def _unpack_covariance(result):
     name = result.get("covariance") or ""
-    cov = np.asarray(result["params"]["cov"], dtype=float) if result["params"]["cov"] else np.zeros((0,))
+    cov = np.asarray(_values(result["params"]["cov"]), dtype=float)
     k = int(result["K"])
     j = int(result["n_gaussian"])
     if j == 0 or cov.size == 0 or not name:
@@ -422,7 +478,7 @@ class LatentProfileModel(_LatentEstimator):
     _model = "lpa"
 
     def __init__(self, n_states=2, covariance="VVV", n_starts=40, random_state=None,
-                 screen_iter=10, n_full=4, max_iter=200, tol=1e-7, replicate_tol=1e-3,
+                 screen_iter=10, n_full=4, max_iter=200, tol=1e-7, replicate_tol=0.1,
                  n_threads=1, align_labels=True, family=None):
         self.n_states = n_states
         self.covariance = covariance
@@ -452,6 +508,11 @@ class LatentProfileModel(_LatentEstimator):
 class LatentClassModel(_LatentEstimator):
     """One-wave categorical latent class model.
 
+    ``n_waves > 1`` is a wide DataFrame or array, wave-major. On evaluation,
+    a wide DataFrame must repeat the fitted column order, including later-wave
+    names. A NumPy array stays positional and, after a named fit, is labeled
+    with the fitted indicator names in that order.
+
     ``check_estimator`` does not apply: the checker supplies continuous
     arrays, and a class model needs categorical codes. Compare it with the
     pandas API on coded indicators instead.
@@ -460,7 +521,7 @@ class LatentClassModel(_LatentEstimator):
     _model = "lca"
 
     def __init__(self, n_states=2, n_starts=40, random_state=None, screen_iter=10, n_full=4,
-                 max_iter=200, tol=1e-7, replicate_tol=1e-3, n_threads=1, align_labels=True,
+                 max_iter=200, tol=1e-7, replicate_tol=0.1, n_threads=1, align_labels=True,
                  family=None, n_waves=1):
         self.n_states = n_states
         self.n_starts = n_starts
@@ -485,6 +546,10 @@ class LatentClassModel(_LatentEstimator):
             return frame, "_id", None, indicators
         array = values.to_numpy(dtype=float) if isinstance(values, pd.DataFrame) else np.asarray(values, dtype=float)
         name_row = names if isinstance(values, pd.DataFrame) else None
+        if waves > 1 and not reset:
+            if isinstance(values, pd.DataFrame):
+                self._require_wide_dataframe_column_order(values.columns)
+            name_row = self._wide_names_for_evaluation(waves, name_row)
         return _wide_to_long(array, waves, name_row)
 
 
@@ -492,7 +557,11 @@ class LatentTransitionModel(_LatentEstimator):
     """First-order latent transition model.
 
     A NumPy array is wide and wave-major: ``n_waves * n_indicators`` columns.
-    A long DataFrame is used when ``id_column`` and ``wave_column`` are set.
+    It stays positional. After a named wide fit, those positions are labeled
+    with the fitted indicator names. A wide DataFrame uses that same layout,
+    and evaluation requires the full fitted column order, so a later-wave
+    rename or swap is an error. A long DataFrame is used when ``id_column``
+    and ``wave_column`` are set; that path is not the wide-column schema.
 
     :meth:`predict` uses the smoothed modal state. :meth:`filter`,
     :meth:`smooth`, and :meth:`viterbi` stay separate.
@@ -506,7 +575,7 @@ class LatentTransitionModel(_LatentEstimator):
     def __init__(self, n_states=2, covariance="VVV", n_starts=40, random_state=None,
                  n_waves=1, transitions="equal", measurement_invariant=True,
                  means_invariant=True, covariance_invariant=True, screen_iter=10, n_full=4,
-                 max_iter=200, tol=1e-7, replicate_tol=1e-3, n_threads=1, align_labels=True,
+                 max_iter=200, tol=1e-7, replicate_tol=0.1, n_threads=1, align_labels=True,
                  family=None, id_column=None, wave_column=None):
         self.n_states = n_states
         self.covariance = covariance
@@ -542,12 +611,19 @@ class LatentTransitionModel(_LatentEstimator):
                 indicators = list(frame.columns)
                 frame = frame.assign(_id=np.arange(len(frame)))
                 return frame, "_id", None, indicators
-            return _wide_to_long(array, waves, list(values.columns))
+            name_row = list(values.columns)
+            if not reset:
+                self._require_wide_dataframe_column_order(values.columns)
+                name_row = self._wide_names_for_evaluation(waves, name_row)
+            return _wide_to_long(array, waves, name_row)
         if waves == 1:
             frame = pd.DataFrame(values, columns=[f"x{i}" for i in range(values.shape[1])])
             frame = frame.assign(_id=np.arange(len(frame)))
             return frame, "_id", None, [f"x{i}" for i in range(values.shape[1])]
-        return _wide_to_long(np.asarray(values, dtype=float), waves, None)
+        name_row = None
+        if not reset:
+            name_row = self._wide_names_for_evaluation(waves, None)
+        return _wide_to_long(np.asarray(values, dtype=float), waves, name_row)
 
 
 class StateCountSearch:

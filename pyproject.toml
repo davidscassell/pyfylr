@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.8", "pybind11>=2.13"]
+requires = ["scikit-build-core>=1.0", "pybind11>=2.13"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -9,6 +9,16 @@ description = "Latent transition, latent class, and latent profile models. Relea
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
 # The wheel installs only the _core extension. These license files are copied
 # into *.dist-info/licenses so the binary carries the Eigen texts. The sdist
 # already force-includes _staged_core/vendor/Eigen.
@@ -21,7 +31,8 @@ license-files = [
   "_staged_core/vendor/Eigen/COPYING.LGPL",
   "_staged_core/vendor/Eigen/COPYING.README",
 ]
-authors = [{name = "David S. Cassell"}]
+authors = [{name = "David S. Cassell", email = "davidscassell@gmail.com"}]
+maintainers = [{name = "David S. Cassell", email = "davidscassell@gmail.com"}]
 dependencies = [
   "numpy>=2.1; python_version>='3.13'",
   "numpy>=2.0; python_version<'3.13'",
@@ -41,6 +52,10 @@ Issues = "https://github.com/davidscassell/pyfylr/issues"
 cmake.version = ">=3.15"
 wheel.packages = ["src/pyfylr"]
 install.strip = false
+
+[tool.scikit-build.sdist]
+# The wheel test runs from the unpacked sdist, not from a git checkout.
+include = ["tests/wheel_check.py", "tests/test_release_wheel.py"]
 
 [tool.scikit-build.sdist.force-include]
 "_staged_core/src/lta.cpp" = "_staged_core/src/lta.cpp"
