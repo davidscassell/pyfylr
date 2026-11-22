@@ -13,10 +13,14 @@ pip install .
 pytest
 ```
 
-`pip install .` compiles the extension from source. It does not select a
-prebuilt wheel. Whether a release includes wheels is undecided.
+`pip install .` from a checkout compiles the extension from source.
+PyPI release 0.1.0 also publishes an sdist and CPython 3.11, 3.12, and
+3.13 wheels for manylinux x86_64, macOS arm64, macOS x86_64, and Windows
+amd64. The release workflow builds those wheels and smoke-imports each
+installed wheel. That smoke import is not a broader test of Windows or
+of Intel Mac.
 
-`pytest` needs the optional plot and scikit-learn extras (`pip install ".[plot,sklearn]" pytest`). Release 1 is tested on Linux x86_64 and Apple Silicon. Windows and Intel Mac are untested.
+`pytest` needs the optional plot and scikit-learn extras (`pip install ".[plot,sklearn]" pytest`). The package tests run on Linux x86_64.
 
 The defaults are 40 random starts, a screen of 10, 4 full starts, `max_iter=200`, and `tol=1e-7`. Eigen's own multithreading is disabled. Random starts use private streams derived from the master seed, so one thread and several threads return the same fit.
 

@@ -29,7 +29,7 @@ def _values(value):
 
 from pyfylr import _core
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "Fit",
     "Grid",
@@ -668,8 +668,40 @@ def match_result_form(raw, like):
     return as_lists(raw)
 
 
+def _analyzed_subjects(panel) -> int:
+    n = int(panel["N"])
+    width = int(panel["T"]) * int(panel["J"])
+    if n < 1 or width < 1:
+        return 0
+    seen = np.zeros(n, dtype=bool)
+    gauss = panel.get("gauss")
+    if gauss is not None:
+        values = np.asarray(gauss, dtype=float)
+        ok = np.isfinite(values)
+        if np.any(ok):
+            seen[np.flatnonzero(ok) // width] = True
+    cat = panel.get("cat")
+    if cat is not None:
+        codes = np.asarray(cat)
+        ok = codes >= 0
+        if np.any(ok):
+            seen[np.flatnonzero(ok) // width] = True
+    return int(np.sum(seen))
+
+
+def _require_identifiable_sample(panel, spec) -> None:
+    k = int(spec["K"])
+    n = _analyzed_subjects(panel)
+    if n < k:
+        raise ValueError(
+            f"too few analyzed subjects to identify {k} states: "
+            f"{n} subject(s) have an observed indicator"
+        )
+
+
 def _fit(data, indicators, id, wave, spec, model, compact=False):
     panel = prepare_panel(data, indicators, id, wave, family=spec.get("family_map"))
+    _require_identifiable_sample(panel, spec)
     raw = dict(_core.fit(panel, spec))
     if not compact:
         raw = as_lists(raw)

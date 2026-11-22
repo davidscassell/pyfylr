@@ -568,9 +568,14 @@ raise SystemExit(pytest.main([
     "pyfylr/tests/test_sklearn_api.py::test_check_estimator_where_it_applies",
 ]))
 """
+    test_path = __import__("pathlib").Path(__file__).resolve()
+    script = script.replace(
+        '"pyfylr/tests/test_sklearn_api.py::test_check_estimator_where_it_applies"',
+        repr(f"{test_path}::test_check_estimator_where_it_applies"),
+    )
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=str(__import__("pathlib").Path(__file__).resolve().parents[2]),
+        cwd=str(test_path.parent),
         capture_output=True,
         text=True,
         check=False,

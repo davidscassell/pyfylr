@@ -11,6 +11,39 @@ import pytest
 import pyfylr as pf
 
 
+def test_fewer_analyzed_subjects_than_states_is_refused():
+    one = pd.DataFrame({"y": [0.2]})
+    with pytest.raises(ValueError, match="too few analyzed subjects to identify 2 states"):
+        pf.fit_lpa(one, ["y"], n_states=2, covariance="EEI", n_starts=1,
+                   screen_iter=0, n_full=1, max_iter=5, seed=1)
+    missing = pd.DataFrame({"id": [1, 2], "y": [np.nan, np.nan]})
+    with pytest.raises(ValueError, match="too few analyzed subjects to identify 1 states: 0 subject"):
+        pf.fit_lpa(missing, ["y"], id="id", n_states=1, covariance="EEI", n_starts=1,
+                   screen_iter=0, n_full=1, max_iter=5, seed=1)
+    longitudinal = pd.DataFrame({"id": [1, 1], "wave": [1, 2], "y": [-1.0, 1.0]})
+    with pytest.raises(ValueError, match="too few analyzed subjects to identify 2 states: 1 subject"):
+        pf.fit_lta(longitudinal, ["y"], id="id", wave="wave", n_states=2,
+                   covariance="EEI", n_starts=1, screen_iter=0, n_full=1,
+                   max_iter=5, seed=1)
+    two = pd.DataFrame({"y": [-1.0, 1.0]})
+    fit = pf.fit_lpa(two, ["y"], n_states=2, covariance="EEI", n_starts=1,
+                     screen_iter=0, n_full=1, max_iter=5, seed=1)
+    assert fit.result["n_analyzed"] == 2
+
+
+def test_declared_version_matches_pyproject_and_build_info():
+    import tomllib
+    from importlib.metadata import version
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    assert declared == "0.1.1"
+    assert pf.__version__ == declared
+    assert pf.build_info()["version"] == declared
+    assert version("pyfylr") == declared
+
+
 def test_build_pins_eigen():
     info = pf.build_info()
     assert info["eigen_version"] == "3.4.0"
